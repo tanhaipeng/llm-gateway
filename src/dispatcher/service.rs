@@ -1,9 +1,8 @@
 use crate::types::{Config, Provider, ProviderConfig, SSEStream};
 use crate::mapper::{RequestMapper, ResponseMapper};
-use futures::{stream, StreamExt};
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct Dispatcher {

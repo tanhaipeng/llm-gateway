@@ -1,4 +1,5 @@
 use axum::{
+    body::Body,
     extract::State,
     http::{Request, StatusCode},
     middleware::Next,
@@ -6,13 +7,11 @@ use axum::{
 };
 
 /// 认证中间件
-pub async fn auth_middleware<B>(
-    State(api_key): State<Option<String>>,
-    request: Request<B>,
-    next: Next<B>,
+pub async fn auth_middleware(
+    State(api_key): State<String>,
+    request: Request<Body>,
+    next: Next,
 ) -> Result<Response, AuthError> {
-    let api_key = api_key.ok_or(AuthError::NoApiKey)?;
-    
     // 跳过健康检查端点
     if request.uri().path() == "/health" {
         return Ok(next.run(request).await);
@@ -39,7 +38,6 @@ pub async fn auth_middleware<B>(
 
 #[derive(Debug)]
 pub enum AuthError {
-    NoApiKey,
     MissingAuthHeader,
     InvalidApiKey,
 }
@@ -47,9 +45,6 @@ pub enum AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            AuthError::NoApiKey => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "API key not configured")
-            }
             AuthError::MissingAuthHeader => {
                 (StatusCode::UNAUTHORIZED, "Missing authorization header")
             }

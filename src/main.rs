@@ -42,30 +42,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gateway_api_key = std::env::var("GATEWAY_API_KEY").ok();
     
     // Build router
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/health", get(health_handler))
         .route("/{provider}/v1/chat/completions", post(proxy_handler))
+        .with_state(dispatcher.clone())
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
                 .allow_headers(Any),
-        )
-        .with_state(dispatcher);
+        );
     
     // Add authentication middleware if API key is configured
-    if gateway_api_key.is_some() {
+    let app = if let Some(ref api_key) = gateway_api_key {
         info!("Authentication enabled - API key required");
-        app = app
+        Router::new()
+            .route("/health", get(health_handler))
             .route("/{provider}/v1/chat/completions", post(proxy_handler))
             .layer(axum::middleware::from_fn_with_state(
-                gateway_api_key.clone(),
+                api_key.clone(),
                 auth::auth_middleware,
             ))
-            .with_state(dispatcher);
+            .with_state(dispatcher)
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                    .allow_headers(Any),
+            )
     } else {
         info!("Authentication disabled - no API key configured");
-    }
+        app
+    };
 
     // Start server
     let addr = SocketAddr::from((
