@@ -50,3 +50,9 @@ providers:
   #     - "deepseek-chat"
   #     - "deepseek-reasoner"
   #   base-url: "https://api.deepseek.com"
+
+  # timesniper provider
+  timesniper:
+    models:
+      - "MiniMax-M2.7"
+    base-url: "https://timesniper.club"
