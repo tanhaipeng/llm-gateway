@@ -8,27 +8,6 @@ server:
 # Providers 配置
 # 注意：API keys 应该从环境变量加载，不要在此文件中直接配置
 providers:
-  openai:
-    models:
-      - "gpt-4"
-      - "gpt-4o"
-      - "gpt-4o-mini"
-      - "gpt-4-turbo"
-      - "gpt-3.5-turbo"
-    base-url: "https://api.openai.com"
-    version: null
-
-  anthropic:
-    models:
-      - "claude-3-5-sonnet"
-      - "claude-3-5-haiku"
-      - "claude-3-opus"
-      - "claude-3-sonnet"
-    base-url: "https://api.anthropic.com"
-    version: "2023-06-01"
-
-  # 取消注释以下 provider 并配置相应的 API keys 来使用
-  
   # mistral:
   #   models:
   #     - "ministral-8b"
