@@ -5,12 +5,19 @@ pub fn load_config() -> Result<Config, crate::types::GatewayError> {
     // 从环境变量获取配置文件路径，默认为 config.yaml
     let config_path = env::var("CONFIG_FILE").unwrap_or_else(|_| "config.yaml".to_string());
     
+    tracing::info!("Attempting to load config from: {}", config_path);
+    
     // 尝试从配置文件加载
-    let config = if let Ok(config) = load_from_file(&config_path) {
-        config
-    } else {
-        // 回退到环境变量配置
-        load_from_env()
+    let config = match load_from_file(&config_path) {
+        Ok(config) => {
+            tracing::info!("Successfully loaded config from file: {}", config_path);
+            config
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load config from file '{}': {}. Falling back to env variables.", config_path, e);
+            // 回退到环境变量配置
+            load_from_env()
+        }
     };
 
     // 从环境变量加载或覆盖 API keys
@@ -20,8 +27,14 @@ pub fn load_config() -> Result<Config, crate::types::GatewayError> {
 }
 
 fn load_from_file(path: &str) -> Result<Config, crate::types::GatewayError> {
-    let content = std::fs::read_to_string(path)?;
-    let config: Config = serde_yaml::from_str(&content)?;
+    // 尝试读取文件
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| crate::types::GatewayError::IoError(e))?;
+    
+    // 解析 YAML
+    let config: Config = serde_yaml::from_str(&content)
+        .map_err(|e| crate::types::GatewayError::YamlError(e))?;
+    
     Ok(config)
 }
 
