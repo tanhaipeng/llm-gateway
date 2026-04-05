@@ -272,12 +272,24 @@ impl ProviderClient {
                         if converted.trim() == "[DONE]" {
                             return Ok(bytes::Bytes::from("data: [DONE]\n\n"));
                         }
-                        Ok(bytes::Bytes::from(format!("data: {}\n\n", converted)))
+                        
+                        // 检查转换后的数据是否已经是 SSE 格式（包含 "data:" 前缀）
+                        // 如果已经包含，直接返回原始数据（保留原有的换行符）
+                        // 否则添加 "data: " 前缀和换行符
+                        if converted.starts_with("data:") {
+                            Ok(bytes::Bytes::from(converted))
+                        } else {
+                            Ok(bytes::Bytes::from(format!("data: {}\n\n", converted)))
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to convert stream data: {}", e);
-                        // 转换失败时，返回原始数据
-                        Ok(bytes::Bytes::from(format!("data: {}\n\n", data)))
+                        // 转换失败时，检查原始数据是否已经是 SSE 格式
+                        if data.starts_with("data:") {
+                            Ok(bytes::Bytes::from(data.to_string()))
+                        } else {
+                            Ok(bytes::Bytes::from(format!("data: {}\n\n", data)))
+                        }
                     }
                 }
             })
