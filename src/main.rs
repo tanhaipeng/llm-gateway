@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/{provider}/v1/chat/completions", post(proxy_handler))
-        .with_state((dispatcher.clone(), request_logger.clone()))
+        .with_state((dispatcher, request_logger))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -73,21 +73,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Add authentication middleware if API key is configured
     let app = if let Some(ref api_key) = gateway_api_key {
         info!("Authentication enabled - API key required");
-        Router::new()
-            .route("/health", get(health_handler))
-            .route("/metrics", get(metrics_handler))
-            .route("/{provider}/v1/chat/completions", post(proxy_handler))
-            .layer(axum::middleware::from_fn_with_state(
-                api_key.clone(),
-                auth::auth_middleware,
-            ))
-            .with_state((dispatcher, request_logger))
-            .layer(
-                CorsLayer::new()
-                    .allow_origin(Any)
-                    .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-                    .allow_headers(Any),
-            )
+        app.layer(axum::middleware::from_fn_with_state(
+            api_key.clone(),
+            auth::auth_middleware,
+        ))
     } else {
         info!("Authentication disabled - no API key configured");
         app

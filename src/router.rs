@@ -86,6 +86,9 @@ pub async fn proxy_handler(
             // 记录请求开始时间
             let start_time = std::time::Instant::now();
             
+            // 在调用provider之前创建tracker
+            let tracker = request_logger.start_request(request_id.clone());
+            
             // 使用超时保护
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(930), // 比客户端超时稍长
@@ -98,71 +101,112 @@ pub async fn proxy_handler(
                 },
             ).await;
 
+            // 计算持续时间
             let duration_ms = start_time.elapsed().as_millis() as u64;
 
             match result {
-                Ok(Ok(response)) => {
-                    // 获取状态码
-                    let status_code = response.status().as_u16();
+                Ok(inner_result) => {
+                    // 处理内部的 Result
+                    match inner_result {
+                        Ok(response) => {
+                            // 处理成功的响应
+                            let status_code = response.status().as_u16();
+                            
+                            // 尝试从响应中提取token信息
+                            let (prompt_tokens, completion_tokens, final_response) = if !is_stream {
+                                // 对于非流式响应，尝试提取usage信息
+                                let (parts, body) = response.into_parts();
+                                
+                                match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+                                    Ok(bytes) => {
+                                        let (prompt, completion) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                                            .ok()
+                                            .and_then(|json| {
+                                                let prompt = json.get("usage")
+                                                    .and_then(|u| u.get("prompt_tokens"))
+                                                    .and_then(|t| t.as_u64())
+                                                    .unwrap_or(0);
+                                                let completion = json.get("usage")
+                                                    .and_then(|u| u.get("completion_tokens"))
+                                                    .and_then(|t| t.as_u64())
+                                                    .unwrap_or(0);
+                                                Some((prompt, completion))
+                                            })
+                                            .unwrap_or((0u64, 0u64));
+                                        
+                                        // 重新构建响应
+                                        let new_response = axum::http::Response::from_parts(parts, axum::body::Body::from(bytes));
+                                        (prompt, completion, new_response)
+                                    }
+                                    Err(_) => {
+                                        let new_response = axum::http::Response::from_parts(parts, axum::body::Body::empty());
+                                        (0u64, 0u64, new_response)
+                                    }
+                                }
+                            } else {
+                                // 流式响应暂时无法提取token
+                                (0u64, 0u64, response)
+                            };
+                            
+                            // 记录成功请求
+                            tracker.complete(
+                                provider.clone(),
+                                model.clone(),
+                                is_stream,
+                                status_code,
+                                prompt_tokens,
+                                completion_tokens,
+                            ).await;
+                            
+                            final_response.into_response()
+                        }
+                        Err(e) => {
+                            // 处理provider返回的错误
+                            let error_message = format!("Provider error: {}", e);
+                            tracing::error!("[{}] {}", request_id, error_message);
+                            
+                            // 记录失败请求
+                            tracker.complete_error(
+                                provider.clone(),
+                                model.clone(),
+                                is_stream,
+                                502,
+                                error_message.clone(),
+                            ).await;
+                            
+                            (axum::http::StatusCode::BAD_GATEWAY, error_message).into_response()
+                        }
+                    }
+                }
+                Err(e) => {
+                    // 处理超时错误
+                    let is_timeout = e.to_string().contains("deadline has elapsed") || 
+                                    std::any::type_name::<tokio::time::error::Elapsed>() == std::any::type_name_of_val(&e);
                     
-                    // 尝试从响应中提取token信息（简化处理）
-                    let (prompt_tokens, completion_tokens) = if !is_stream {
-                        // 简化处理：暂时不提取token，避免响应体移动问题
-                        (0u64, 0u64)
+                    let (status_code, error_message) = if is_timeout {
+                        (504, "Request timeout".to_string())
                     } else {
-                        (0u64, 0u64)
+                        (500, e.to_string())
                     };
                     
-                    // 记录成功请求
-                    let tracker = request_logger.start_request(request_id.clone());
-                    tracker.complete(
+                    tracing::error!("[{}] Error forwarding request: {}", request_id, error_message);
+                    
+                    // 记录失败请求
+                    tracker.complete_error(
                         provider.clone(),
                         model.clone(),
                         is_stream,
                         status_code,
-                        duration_ms,
-                        prompt_tokens + completion_tokens,
+                        error_message.clone(),
                     ).await;
                     
-                    response.into_response()
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("[{}] Error forwarding request: {}", request_id, e);
+                    let status = if status_code == 504 {
+                        axum::http::StatusCode::GATEWAY_TIMEOUT
+                    } else {
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    };
                     
-                    // 记录失败请求
-                    let tracker = request_logger.start_request(request_id.clone());
-                    tracker.complete_error(
-                        provider.clone(),
-                        model.clone(),
-                        is_stream,
-                        500,
-                        e.to_string(),
-                    ).await;
-                    
-                    (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Error: {}", e),
-                    )
-                        .into_response()
-                }
-                Err(_) => {
-                    tracing::error!("[{}] Request timeout", request_id);
-                    
-                    // 记录超时请求
-                    let tracker = request_logger.start_request(request_id.clone());
-                    tracker.complete_error(
-                        provider.clone(),
-                        model.clone(),
-                        is_stream,
-                        504,
-                        "Request timeout".to_string(),
-                    ).await;
-                    
-                    (
-                        axum::http::StatusCode::GATEWAY_TIMEOUT,
-                        "Request timeout",
-                    )
-                        .into_response()
+                    (status, error_message).into_response()
                 }
             }
         }
