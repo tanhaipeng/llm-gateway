@@ -47,9 +47,9 @@ impl ProviderClient {
     /// 构建请求URL
     fn build_url(&self) -> String {
         if self.provider == Provider::Anthropic {
-            format!("{}v1/messages", self.config.base_url)
+            format!("{}/v1/messages", self.config.base_url)
         } else {
-            format!("{}v1/chat/completions", self.config.base_url)
+            format!("{}/v1/chat/completions", self.config.base_url)
         }
     }
 
