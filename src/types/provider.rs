@@ -38,6 +38,7 @@ impl Provider {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct ProviderConfig {
     pub models: Vec<String>,
     pub base_url: String,

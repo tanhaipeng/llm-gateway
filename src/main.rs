@@ -39,6 +39,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let config = load_config()?;
     info!("Loaded configuration with {} providers", config.providers.len());
+    
+    // Log each provider
+    for (name, provider_config) in &config.providers {
+        info!("  Provider: {}, Models: {:?}, API Key: {}", 
+              name, 
+              provider_config.models, 
+              if provider_config.api_key.is_some() { "Set" } else { "Not set" });
+    }
 
     // Create dispatcher
     let dispatcher = Dispatcher::new(&config);
