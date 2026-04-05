@@ -12,8 +12,9 @@ pub async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, AuthError> {
-    // 跳过健康检查端点
-    if request.uri().path() == "/health" {
+    // 跳过健康检查和监控端点
+    let path = request.uri().path();
+    if path == "/health" || path == "/metrics" {
         return Ok(next.run(request).await);
     }
     

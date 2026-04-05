@@ -12,6 +12,17 @@ cp .env.template .env
 nano .env
 ```
 
+**可选配置**：如果需要启用认证，在 `.env` 文件中设置：
+```env
+GATEWAY_API_KEY=your_secret_key_here
+```
+
+启用认证后，所有请求都需要在 header 中提供：
+```
+Authorization: Bearer your_secret_key_here
+```
+注意：`/health` 和 `/metrics` 端点不需要认证。
+
 ## 2. 配置 Providers
 
 ### 选项 A：仅使用内置 providers（OpenAI + Anthropic）
@@ -55,6 +66,22 @@ cargo run
 ### 健康检查
 ```bash
 curl http://localhost:8080/health
+```
+
+### 性能监控
+```bash
+curl http://localhost:8080/metrics | jq
+```
+
+### 流式请求测试
+```bash
+curl -X POST http://localhost:8080/openai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Count to 5"}],
+    "stream": true
+  }'
 ```
 
 ### 测试 OpenAI
@@ -160,7 +187,17 @@ print(response.choices[0].message.content)
 **解决**：
 1. 检查 `.env` 文件中的 API key 是否正确
 2. 确认环境变量名称格式正确（`{PROVIDER}_API_KEY`）
-3. 重启服务
+3. 如果启用了网关认证，确保请求包含正确的 `Authorization` header
+4. 重启服务
+
+### 问题：401 Unauthorized（网关认证）
+
+**原因**：未提供或提供了错误的网关认证 key
+
+**解决**：
+1. 检查是否设置了 `GATEWAY_API_KEY` 环境变量
+2. 确认请求中包含正确的 `Authorization: Bearer YOUR_KEY` header
+3. 注意 `/health` 和 `/metrics` 端点不需要认证
 
 ## 7. 添加更多 Providers
 

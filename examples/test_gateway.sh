@@ -5,19 +5,31 @@
 BASE_URL="http://localhost:8080"
 
 echo "========================================="
-echo "LLM Gateway 测试"
+echo "LLM Gateway 功能测试"
 echo "========================================="
 echo ""
 
-# 健康检查
+# 1. 健康检查
 echo "1. 健康检查"
 echo "GET $BASE_URL/health"
 curl -s "$BASE_URL/health"
 echo ""
 echo ""
 
-# OpenAI 请求示例
-echo "2. OpenAI 请求示例"
+# 2. 性能监控测试
+echo "2. 性能监控测试"
+echo "GET $BASE_URL/metrics"
+curl -s "$BASE_URL/metrics" | jq '{
+  total_requests: .total_requests,
+  success_rate: .success_rate,
+  error_rate: .error_rate,
+  avg_latency_ms: .avg_latency_ms
+}'
+echo ""
+echo ""
+
+# 3. OpenAI 非流式请求
+echo "3. OpenAI 非流式请求"
 echo "POST $BASE_URL/openai/v1/chat/completions"
 curl -X POST "$BASE_URL/openai/v1/chat/completions" \
   -H "Content-Type: application/json" \
@@ -31,8 +43,24 @@ curl -X POST "$BASE_URL/openai/v1/chat/completions" \
 echo ""
 echo ""
 
-# Anthropic 请求示例
-echo "3. Anthropic 请求示例"
+# 4. OpenAI 流式请求
+echo "4. OpenAI 流式请求"
+echo "POST $BASE_URL/openai/v1/chat/completions (stream=true)"
+curl -X POST "$BASE_URL/openai/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [
+      {"role": "user", "content": "Count to 3"}
+    ],
+    "stream": true,
+    "max_tokens": 50
+  }' 2>/dev/null | head -n 5
+echo ""
+echo ""
+
+# 5. Anthropic 请求
+echo "5. Anthropic 请求"
 echo "POST $BASE_URL/anthropic/v1/chat/completions"
 curl -X POST "$BASE_URL/anthropic/v1/chat/completions" \
   -H "Content-Type: application/json" \
@@ -46,6 +74,35 @@ curl -X POST "$BASE_URL/anthropic/v1/chat/completions" \
 echo ""
 echo ""
 
+# 6. 请求大小限制测试（应被拒绝）
+echo "6. 请求大小限制测试"
+echo "POST $BASE_URL/openai/v1/chat/completions (超大请求)"
+LARGE_DATA=$(python3 -c "print('x'*11000000)")
+curl -X POST "$BASE_URL/openai/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"$LARGE_DATA\"}]}" \
+  -w "\nHTTP Status: %{http_code}\n" 2>/dev/null
+echo ""
+echo ""
+
+# 7. 错误处理测试（无效的 provider）
+echo "7. 错误处理测试（无效的 provider）"
+echo "POST $BASE_URL/invalid-provider/v1/chat/completions"
+curl -X POST "$BASE_URL/invalid-provider/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "test-model",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }' \
+  -w "\nHTTP Status: %{http_code}\n" 2>/dev/null
+echo ""
+echo ""
+
 echo "========================================="
-echo "测试完成"
+echo "基础测试完成"
 echo "========================================="
+echo ""
+echo "提示："
+echo "- 如需测试认证功能，请设置 GATEWAY_API_KEY 环境变量"
+echo "- 查看 metrics 端点获取详细的性能数据"
+echo "- 查看日志了解请求处理详情"

@@ -103,9 +103,7 @@ impl ProviderClient {
                 Err(_) => format!("HTTP {}: {}", status, status.canonical_reason().unwrap_or("Unknown")),
             };
             
-            tracing::error!("Provider returned error {}: {}", status, error_body);
-            
-            // 尝试解析错误响应
+// 尝试解析错误响应
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_body) {
                 if let Some(error_obj) = json.get("error") {
                     if let Some(error_message) = error_obj.get("message").and_then(|m| m.as_str()) {
@@ -119,8 +117,9 @@ impl ProviderClient {
                         return Ok(axum::response::Response::builder()
                             .status(status)
                             .header("Content-Type", "application/json")
-                            .body(axum::body::Body::from(serde_json::to_vec(&error_response).unwrap()))
-                            .unwrap()
+                            .body(axum::body::Body::from(serde_json::to_vec(&error_response)
+                                .expect("Failed to serialize error response")))
+                            .expect("Failed to build error response")
                         );
                     }
                 }
@@ -134,12 +133,13 @@ impl ProviderClient {
                     "code": status.as_u16().to_string()
                 }
             });
-            
+
             return Ok(axum::response::Response::builder()
                 .status(status)
                 .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(serde_json::to_vec(&error_response).unwrap()))
-                .unwrap()
+                .body(axum::body::Body::from(serde_json::to_vec(&error_response)
+                    .expect("Failed to serialize error response")))
+                .expect("Failed to build error response")
             );
         }
 
@@ -205,7 +205,7 @@ impl ProviderClient {
             };
             
             tracing::error!("Provider returned error in stream request {}: {}", status, error_body);
-            
+
             // 尝试解析错误响应
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_body) {
                 if let Some(error_obj) = json.get("error") {
@@ -220,8 +220,9 @@ impl ProviderClient {
                         return Ok(axum::response::Response::builder()
                             .status(status)
                             .header("Content-Type", "application/json")
-                            .body(axum::body::Body::from(serde_json::to_vec(&error_response).unwrap()))
-                            .unwrap()
+                            .body(axum::body::Body::from(serde_json::to_vec(&error_response)
+                                .expect("Failed to serialize error response")))
+                            .expect("Failed to build error response")
                         );
                     }
                 }
@@ -235,12 +236,13 @@ impl ProviderClient {
                     "code": status.as_u16().to_string()
                 }
             });
-            
+
             return Ok(axum::response::Response::builder()
                 .status(status)
                 .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(serde_json::to_vec(&error_response).unwrap()))
-                .unwrap()
+                .body(axum::body::Body::from(serde_json::to_vec(&error_response)
+                    .expect("Failed to serialize error response")))
+                .expect("Failed to build error response")
             );
         }
 

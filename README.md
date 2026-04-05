@@ -9,7 +9,10 @@
 - 🎛️ 支持自定义 OpenAI 兼容的 providers
 - ⚡ 高性能异步转发
 - 🛡️ CORS 支持
-- 📊 结构化日志
+- 📊 结构化日志和性能监控
+- 🔒 可选的 API 认证
+- 🔄 完整的流式处理支持
+- 🛠️ 工具调用支持
 - ⚙️ 灵活的配置方式（环境变量或 YAML 配置文件）
 
 ## 支持的 Providers
@@ -203,6 +206,7 @@ curl -X POST http://localhost:8080/my-custom-provider/v1/chat/completions \
 | 端点 | 方法 | 描述 |
 |------|------|------|
 | `/health` | GET | 健康检查 |
+| `/metrics` | GET | 性能监控数据 |
 | `/{provider}/v1/chat/completions` | POST | 聊天补全请求 |
 
 其中 `{provider}` 可以是：
@@ -235,6 +239,7 @@ providers:
 
 | 变量 | 描述 | 必需 |
 |------|------|------|
+| `GATEWAY_API_KEY` | 网关 API 认证 key | 否 |
 | `OPENAI_API_KEY` | OpenAI API key | 否 |
 | `ANTHROPIC_API_KEY` | Anthropic API key | 否 |
 | `{PROVIDER}_API_KEY` | 自定义 provider API key | 否 |
@@ -256,6 +261,95 @@ Request → Axum Router → Dispatcher → Provider Client → LLM Provider → 
                                  OpenAI Compatible
                                  (Custom Providers)
 ```
+
+## 高级功能
+
+### 认证
+
+网关支持 API 认证功能，可保护所有请求端点：
+
+1. 在 `.env` 文件中设置 `GATEWAY_API_KEY`
+2. 在请求中添加 `Authorization: Bearer YOUR_GATEWAY_API_KEY` header
+3. `/health` 和 `/metrics` 端点不需要认证
+
+```bash
+curl -X POST http://localhost:8080/openai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+### 流式处理
+
+支持流式响应处理，包括：
+
+- 完整的流式事件处理（10+ 种事件类型）
+- Stop Reason 映射（max_tokens→length, tool_use→tool_calls 等）
+- 工具调用流式支持
+- 实时数据转换和转发
+
+```bash
+curl -X POST http://localhost:8080/openai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
+```
+
+### 性能监控
+
+内置性能监控系统，提供详细的运行指标：
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+监控数据包括：
+- 总请求数和成功率
+- 平均延迟和 P50/P95/P99 百分位
+- Token 使用统计
+- 按提供商分组的性能数据
+- 错误率统计
+
+### 工具调用
+
+支持 LLM 工具调用功能（Function Calling）：
+
+```bash
+curl -X POST http://localhost:8080/openai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "What is the weather?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string"}
+          }
+        }
+      }
+    }]
+  }'
+```
+
+### 日志系统
+
+完整的请求日志记录，包括：
+
+- 请求 ID 追踪
+- 提供商、模型、状态码记录
+- 请求持续时间
+- Token 使用统计
+- 详细的错误日志
 
 ## 开发
 
