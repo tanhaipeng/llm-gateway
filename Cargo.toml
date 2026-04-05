@@ -43,6 +43,9 @@ async-trait = "0.1"
 # URL parsing
 url = "2.5"
 
+# UUID generation
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
 [profile.release]
 opt-level = 3
 lto = true

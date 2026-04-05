@@ -14,8 +14,7 @@ impl RequestMapper {
         
         match target_provider {
             crate::types::Provider::Anthropic => Self::openai_to_anthropic(json),
-            crate::types::Provider::OpenAI => Ok(body.clone()),
-            crate::types::Provider::Custom(_) => Ok(body.clone()), // OpenAI 兼容的 providers 直接转发
+            crate::types::Provider::OpenAI | crate::types::Provider::GoogleGemini | crate::types::Provider::Deepseek | crate::types::Provider::Custom(_) => Ok(body.clone()), // OpenAI 兼容的 providers 直接转发
         }
     }
     

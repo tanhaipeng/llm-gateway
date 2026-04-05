@@ -30,34 +30,19 @@ impl ProviderClient {
         }
     }
 
-    /// 检查请求是否是流式请求
-    pub fn is_stream_request(&self, body: &bytes::Bytes) -> Result<bool, crate::types::GatewayError> {
-        let json: serde_json::Value = serde_json::from_slice(body)?;
-        Ok(json.get("stream")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false))
-    }
-
-    /// 非流式请求转发
-    pub async fn forward_request(
-        &self,
-        body: bytes::Bytes,
-    ) -> Result<axum::response::Response, crate::types::GatewayError> {
-        // 转换请求体格式
-        let converted_body = RequestMapper::convert_request(&body, &self.provider)?;
-        
-        let path = "/v1/chat/completions";
-        let url = if self.provider == Provider::Anthropic {
+    /// 构建请求URL
+    fn build_url(&self) -> String {
+        if self.provider == Provider::Anthropic {
             format!("{}v1/messages", self.config.base_url)
         } else {
-            format!("{}{}", self.config.base_url, path)
-        };
-        
-        let mut request_builder = self.client.post(&url);
-        
-        // Add provider-specific headers
+            format!("{}v1/chat/completions", self.config.base_url)
+        }
+    }
+
+    /// 添加provider特定的headers
+    fn add_provider_headers(&self, mut request_builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self.provider {
-            Provider::OpenAI => {
+            Provider::OpenAI | Provider::GoogleGemini | Provider::Deepseek | Provider::Custom(_) => {
                 if let Some(api_key) = &self.config.api_key {
                     request_builder = request_builder.header(
                         reqwest::header::AUTHORIZATION,
@@ -67,29 +52,26 @@ impl ProviderClient {
             }
             Provider::Anthropic => {
                 if let Some(api_key) = &self.config.api_key {
-                    request_builder = request_builder.header(
-                        "x-api-key",
-                        api_key,
-                    );
+                    request_builder = request_builder.header("x-api-key", api_key);
                 }
                 if let Some(version) = &self.config.version {
-                    request_builder = request_builder.header(
-                        "anthropic-version",
-                        version,
-                    );
-                }
-            }
-            Provider::Custom(_) => {
-                if let Some(api_key) = &self.config.api_key {
-                    request_builder = request_builder.header(
-                        reqwest::header::AUTHORIZATION,
-                        format!("Bearer {}", api_key),
-                    );
+                    request_builder = request_builder.header("anthropic-version", version);
                 }
             }
         }
+        request_builder
+    }
 
-        // Add common headers
+    /// 非流式请求转发
+    pub async fn forward_request(
+        &self,
+        body: bytes::Bytes,
+    ) -> Result<axum::response::Response, crate::types::GatewayError> {
+        let converted_body = RequestMapper::convert_request(&body, &self.provider)?;
+        let url = self.build_url();
+        
+        let mut request_builder = self.add_provider_headers(self.client.post(&url));
+        
         request_builder = request_builder
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
@@ -109,7 +91,6 @@ impl ProviderClient {
         let headers = response.headers().clone();
         let body_bytes = response.bytes().await?;
         
-        // 转换响应体格式
         let response_data = String::from_utf8_lossy(&body_bytes);
         let converted_response = ResponseMapper::convert_response(&response_data, &self.provider, false)?;
         
@@ -129,55 +110,12 @@ impl ProviderClient {
         &self,
         body: bytes::Bytes,
     ) -> Result<axum::response::Response, crate::types::GatewayError> {
-        // 转换请求体格式
         let converted_body = RequestMapper::convert_request(&body, &self.provider)?;
-        
-        let path = "/v1/chat/completions";
-        let url = if self.provider == Provider::Anthropic {
-            format!("{}v1/messages", self.config.base_url)
-        } else {
-            format!("{}{}", self.config.base_url, path)
-        };
-        
+        let url = self.build_url();
         let provider_clone = self.provider.clone();
         
-        let mut request_builder = self.client.post(&url);
-        
-        // Add provider-specific headers
-        match self.provider {
-            Provider::OpenAI => {
-                if let Some(api_key) = &self.config.api_key {
-                    request_builder = request_builder.header(
-                        reqwest::header::AUTHORIZATION,
-                        format!("Bearer {}", api_key),
-                    );
-                }
-            }
-            Provider::Anthropic => {
-                if let Some(api_key) = &self.config.api_key {
-                    request_builder = request_builder.header(
-                        "x-api-key",
-                        api_key,
-                    );
-                }
-                if let Some(version) = &self.config.version {
-                    request_builder = request_builder.header(
-                        "anthropic-version",
-                        version,
-                    );
-                }
-            }
-            Provider::Custom(_) => {
-                if let Some(api_key) = &self.config.api_key {
-                    request_builder = request_builder.header(
-                        reqwest::header::AUTHORIZATION,
-                        format!("Bearer {}", api_key),
-                    );
-                }
-            }
-        }
+        let mut request_builder = self.add_provider_headers(self.client.post(&url));
 
-        // Add common headers for streaming
         request_builder = request_builder
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
@@ -193,14 +131,12 @@ impl ProviderClient {
             ));
         }
 
-        // 直接使用 response 的字节流
         let byte_stream = response.bytes_stream().map(|result| {
             result.map_err(|e| crate::types::GatewayError::StreamError(
                 crate::types::stream::StreamError::BodyError(e.to_string())
             ))
         });
         
-        // 转换流数据
         let converted_stream = Box::pin(byte_stream.map(move |result| {
             result.and_then(|bytes| {
                 let data = String::from_utf8_lossy(&bytes);
@@ -209,7 +145,6 @@ impl ProviderClient {
             })
         })) as SSEStream;
         
-        // 构建流式响应
         let axum_response = axum::response::Response::builder()
             .status(axum::http::StatusCode::OK)
             .header("Content-Type", "text/event-stream; charset=utf-8")

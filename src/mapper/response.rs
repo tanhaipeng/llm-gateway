@@ -18,8 +18,7 @@ impl ResponseMapper {
                     Self::anthropic_to_openai(data)
                 }
             }
-            crate::types::Provider::OpenAI => Ok(data.to_string()),
-            crate::types::Provider::Custom(_) => Ok(data.to_string()), // OpenAI 兼容的 providers
+            crate::types::Provider::OpenAI | crate::types::Provider::GoogleGemini | crate::types::Provider::Deepseek | crate::types::Provider::Custom(_) => Ok(data.to_string()), // OpenAI 兼容的 providers
         }
     }
     

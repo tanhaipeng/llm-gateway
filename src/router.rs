@@ -14,14 +14,16 @@ pub async fn proxy_handler(
 
     match dispatcher.get_provider(&provider) {
         Some(provider_client) => {
-            // 检查是否是流式请求
-            let is_stream = match provider_client.is_stream_request(&body) {
-                Ok(stream) => stream,
-                Err(e) => {
-                    tracing::error!("Failed to parse request body: {}", e);
+            // 直接从请求体中判断是否为流式请求
+            let is_stream = match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(json) => json.get("stream")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                Err(_) => {
+                    tracing::error!("Failed to parse request body as JSON");
                     return (
                         axum::http::StatusCode::BAD_REQUEST,
-                        format!("Invalid request body: {}", e),
+                        "Invalid request body: not valid JSON",
                     )
                         .into_response();
                 }
