@@ -1,7 +1,9 @@
 mod auth;
 mod config;
 mod dispatcher;
+mod logging;
 mod mapper;
+mod metrics;
 mod router;
 mod types;
 
@@ -18,7 +20,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use config::load_config;
 use dispatcher::Dispatcher;
-use router::{health_handler, proxy_handler};
+use router::{health_handler, metrics_handler, proxy_handler};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build router
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/{provider}/v1/chat/completions", post(proxy_handler))
         .with_state(dispatcher.clone())
         .layer(
@@ -58,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Authentication enabled - API key required");
         Router::new()
             .route("/health", get(health_handler))
+            .route("/metrics", get(metrics_handler))
             .route("/{provider}/v1/chat/completions", post(proxy_handler))
             .layer(axum::middleware::from_fn_with_state(
                 api_key.clone(),

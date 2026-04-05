@@ -20,8 +20,15 @@ impl RequestMapper {
     
     /// OpenAI → Anthropic 请求格式转换
     fn openai_to_anthropic(openai_json: Value) -> Result<Bytes, crate::types::GatewayError> {
+        // 获取模型名称并应用版本映射
+        let raw_model = openai_json.get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("claude-3-5-sonnet");
+        
+        let model = Self::map_model_version(raw_model);
+        
         let mut anthropic_json = serde_json::json!({
-            "model": openai_json.get("model").unwrap_or(&Value::String("claude-3-5-sonnet".to_string())),
+            "model": model,
             "max_tokens": openai_json.get("max_tokens").unwrap_or(&Value::Number(serde_json::Number::from(4096u32))),
             "messages": openai_json.get("messages"),
             "stream": openai_json.get("stream").unwrap_or(&Value::Bool(false))
@@ -96,6 +103,25 @@ impl RequestMapper {
         
         let result = serde_json::to_vec(&anthropic_json)?;
         Ok(Bytes::from(result))
+    }
+    
+    /// 映射模型版本
+    /// 
+    /// Claude 3.x 需要显式的 `-latest` 后缀
+    /// Claude 4.x 不需要后缀（使用 implicit latest）
+    fn map_model_version(model: &str) -> String {
+        let model_lower = model.to_lowercase();
+        
+        // Claude 3.x 模型需要 -latest 后缀
+        if model_lower.contains("claude-3") {
+            // 检查是否已经有后缀
+            if !model.ends_with("-latest") {
+                return format!("{}-latest", model);
+            }
+        }
+        
+        // Claude 4.x 或其他模型，直接返回（不添加后缀）
+        model.to_string()
     }
     
     /// 转换 OpenAI 用户消息内容
