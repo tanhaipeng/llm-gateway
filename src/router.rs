@@ -1,6 +1,6 @@
 use crate::dispatcher::Dispatcher;
-use crate::logging::RequestLogger;
-use crate::metrics::MetricsCollector;
+use crate::logging;
+use crate::metrics;
 use axum::{
     extract::{Path, State},
     response::{IntoResponse, Response, Json},
@@ -11,10 +11,14 @@ use uuid::Uuid;
 // 请求大小限制 (10MB)
 const MAX_REQUEST_SIZE: usize = 10 * 1024 * 1024;
 
-/// 性能指标端点
-pub async fn metrics_handler() -> Json<serde_json::Value> {
-    let collector = MetricsCollector::new();
-    let metrics = collector.collect_metrics(
+/// 性能监控端点处理器
+pub async fn metrics_handler(
+    State((_, request_logger)): State<(Dispatcher, logging::RequestLogger)>,
+) -> Json<serde_json::Value> {
+    let collector = metrics::MetricsCollector::new();
+    // 使用全局共享的 request_logger
+    let metrics = collector.collect_metrics_with_logger(
+        &request_logger,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -25,7 +29,7 @@ pub async fn metrics_handler() -> Json<serde_json::Value> {
 }
 
 pub async fn proxy_handler(
-    State(dispatcher): State<Dispatcher>,
+    State((dispatcher, request_logger)): State<(Dispatcher, logging::RequestLogger)>,
     Path(provider): Path<String>,
     body: Bytes,
 ) -> Response {
@@ -79,6 +83,9 @@ pub async fn proxy_handler(
 
     match dispatcher.get_provider(&provider) {
         Some(provider_client) => {
+            // 记录请求开始时间
+            let start_time = std::time::Instant::now();
+            
             // 使用超时保护
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(930), // 比客户端超时稍长
@@ -91,29 +98,30 @@ pub async fn proxy_handler(
                 },
             ).await;
 
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+
             match result {
                 Ok(Ok(response)) => {
-                    // 获取状态码和token信息
+                    // 获取状态码
                     let status_code = response.status().as_u16();
                     
-                    // 对于非流式请求，尝试提取token信息
+                    // 尝试从响应中提取token信息（简化处理）
                     let (prompt_tokens, completion_tokens) = if !is_stream {
-                        // 这里我们简化处理，实际可能需要从响应中提取
+                        // 简化处理：暂时不提取token，避免响应体移动问题
                         (0u64, 0u64)
                     } else {
                         (0u64, 0u64)
                     };
                     
                     // 记录成功请求
-                    let logger = RequestLogger::new();
-                    let tracker = logger.start_request(request_id.clone());
+                    let tracker = request_logger.start_request(request_id.clone());
                     tracker.complete(
                         provider.clone(),
                         model.clone(),
                         is_stream,
                         status_code,
-                        prompt_tokens,
-                        completion_tokens,
+                        duration_ms,
+                        prompt_tokens + completion_tokens,
                     ).await;
                     
                     response.into_response()
@@ -122,8 +130,7 @@ pub async fn proxy_handler(
                     tracing::error!("[{}] Error forwarding request: {}", request_id, e);
                     
                     // 记录失败请求
-                    let logger = RequestLogger::new();
-                    let tracker = logger.start_request(request_id.clone());
+                    let tracker = request_logger.start_request(request_id.clone());
                     tracker.complete_error(
                         provider.clone(),
                         model.clone(),
@@ -142,8 +149,7 @@ pub async fn proxy_handler(
                     tracing::error!("[{}] Request timeout", request_id);
                     
                     // 记录超时请求
-                    let logger = RequestLogger::new();
-                    let tracker = logger.start_request(request_id.clone());
+                    let tracker = request_logger.start_request(request_id.clone());
                     tracker.complete_error(
                         provider.clone(),
                         model.clone(),
@@ -164,8 +170,7 @@ pub async fn proxy_handler(
             tracing::error!("[{}] Provider not found: {}", request_id, provider);
             
             // 记录提供商未找到错误
-            let logger = RequestLogger::new();
-            let tracker = logger.start_request(request_id.clone());
+            let tracker = request_logger.start_request(request_id.clone());
             tracker.complete_error(
                 provider.clone(),
                 model.clone(),

@@ -48,7 +48,12 @@ impl MetricsCollector {
 
     /// 收集性能指标
     pub async fn collect_metrics(&self, uptime_seconds: u64) -> PerformanceMetrics {
-        let stats = self.logger.get_stats().await;
+        self.collect_metrics_with_logger(&self.logger, uptime_seconds).await
+    }
+    
+    /// 使用指定的 logger 收集性能指标
+    pub async fn collect_metrics_with_logger(&self, logger: &RequestLogger, uptime_seconds: u64) -> PerformanceMetrics {
+        let stats = logger.get_stats().await;
         
         let total_requests = stats.total_requests;
         let success_rate = if total_requests > 0 {

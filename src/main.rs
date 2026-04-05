@@ -51,15 +51,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create dispatcher
     let dispatcher = Dispatcher::new(&config);
 
+    // Create request logger (shared state)
+    let request_logger = logging::RequestLogger::new();
+
     // Check if authentication is enabled
     let gateway_api_key = std::env::var("GATEWAY_API_KEY").ok();
     
-    // Build router
+    // Build router with shared state
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/{provider}/v1/chat/completions", post(proxy_handler))
-        .with_state(dispatcher.clone())
+        .with_state((dispatcher.clone(), request_logger.clone()))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -78,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 api_key.clone(),
                 auth::auth_middleware,
             ))
-            .with_state(dispatcher)
+            .with_state((dispatcher, request_logger))
             .layer(
                 CorsLayer::new()
                     .allow_origin(Any)
