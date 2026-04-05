@@ -2,8 +2,11 @@ use crate::types::Config;
 use std::env;
 
 pub fn load_config() -> Result<Config, crate::types::GatewayError> {
+    // 从环境变量获取配置文件路径，默认为 config.yaml
+    let config_path = env::var("CONFIG_FILE").unwrap_or_else(|_| "config.yaml".to_string());
+    
     // 尝试从配置文件加载
-    let config = if let Ok(config) = load_from_file("config.yaml") {
+    let config = if let Ok(config) = load_from_file(&config_path) {
         config
     } else {
         // 回退到环境变量配置
