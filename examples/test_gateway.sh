@@ -85,8 +85,62 @@ curl -X POST "$BASE_URL/openai/v1/chat/completions" \
 echo ""
 echo ""
 
-# 7. 错误处理测试（无效的 provider）
-echo "7. 错误处理测试（无效的 provider）"
+# 7. 工具调用测试
+echo "7. 工具调用测试"
+echo "POST $BASE_URL/openai/v1/chat/completions (with tools)"
+curl -X POST "$BASE_URL/openai/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "What is the weather in Tokyo?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather in a location",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "The city and state"
+            }
+          },
+          "required": ["location"]
+        }
+      }
+    }]
+  }' 2>/dev/null | jq -r '.choices[0].message.tool_calls[0].function.name // "No tool call"'
+echo ""
+echo ""
+
+# 8. 流式工具调用测试
+echo "8. 流式工具调用测试"
+echo "POST $BASE_URL/openai/v1/chat/completions (stream + tools)"
+curl -X POST "$BASE_URL/openai/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Get weather for Paris"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string"}
+          }
+        }
+      }
+    }],
+    "stream": true
+  }' 2>/dev/null | head -n 3
+echo ""
+echo ""
+
+# 9. 错误处理测试（无效的 provider）
+echo "9. 错误处理测试（无效的 provider）"
 echo "POST $BASE_URL/invalid-provider/v1/chat/completions"
 curl -X POST "$BASE_URL/invalid-provider/v1/chat/completions" \
   -H "Content-Type: application/json" \

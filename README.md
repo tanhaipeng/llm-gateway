@@ -318,7 +318,9 @@ curl http://localhost:8080/metrics
 
 ### 工具调用
 
-支持 LLM 工具调用功能（Function Calling）：
+支持 LLM 工具调用功能（Function Calling），包括：
+- **非流式工具调用**：一次性返回完整的工具调用结果
+- **流式工具调用**：实时传输工具调用参数，支持大参数的分块传输
 
 ```bash
 curl -X POST http://localhost:8080/openai/v1/chat/completions \
