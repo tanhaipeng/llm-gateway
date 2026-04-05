@@ -83,9 +83,6 @@ pub async fn proxy_handler(
 
     match dispatcher.get_provider(&provider) {
         Some(provider_client) => {
-            // 记录请求开始时间
-            let start_time = std::time::Instant::now();
-            
             // 在调用provider之前创建tracker
             let tracker = request_logger.start_request(request_id.clone());
             
@@ -100,9 +97,6 @@ pub async fn proxy_handler(
                     }
                 },
             ).await;
-
-            // 计算持续时间
-            let duration_ms = start_time.elapsed().as_millis() as u64;
 
             match result {
                 Ok(inner_result) => {

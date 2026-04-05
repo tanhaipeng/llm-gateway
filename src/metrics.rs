@@ -1,11 +1,8 @@
-use crate::logging::RequestLogger;
 use serde::{Deserialize, Serialize};
 
 /// 性能监控器
 #[derive(Clone)]
-pub struct MetricsCollector {
-    logger: RequestLogger,
-}
+pub struct MetricsCollector {}
 
 /// 性能指标
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,18 +38,11 @@ impl Default for MetricsCollector {
 
 impl MetricsCollector {
     pub fn new() -> Self {
-        Self {
-            logger: RequestLogger::new(),
-        }
-    }
-
-    /// 收集性能指标
-    pub async fn collect_metrics(&self, uptime_seconds: u64) -> PerformanceMetrics {
-        self.collect_metrics_with_logger(&self.logger, uptime_seconds).await
+        Self {}
     }
     
     /// 使用指定的 logger 收集性能指标
-    pub async fn collect_metrics_with_logger(&self, logger: &RequestLogger, uptime_seconds: u64) -> PerformanceMetrics {
+    pub async fn collect_metrics_with_logger(&self, logger: &crate::logging::RequestLogger, uptime_seconds: u64) -> PerformanceMetrics {
         let stats = logger.get_stats().await;
         
         let total_requests = stats.total_requests;
@@ -119,57 +109,6 @@ impl MetricsCollector {
             uptime_seconds,
         }
     }
-
-    /// 获取健康状态
-    pub async fn get_health_status(&self) -> HealthStatus {
-        let stats = self.logger.get_stats().await;
-        
-        let total_requests = stats.total_requests;
-        let error_rate = if total_requests > 0 {
-            (stats.failed_requests as f64 / total_requests as f64) * 100.0
-        } else {
-            0.0
-        };
-        
-        let status = if error_rate < 5.0 {
-            "healthy"
-        } else if error_rate < 20.0 {
-            "degraded"
-        } else {
-            "unhealthy"
-        };
-        
-        HealthStatus {
-            status: status.to_string(),
-            total_requests,
-            error_rate,
-            avg_latency_ms: if total_requests > 0 {
-                stats.total_duration_ms as f64 / total_requests as f64
-            } else {
-                0.0
-            },
-        }
-    }
-}
-
-/// 健康状态
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthStatus {
-    pub status: String,
-    pub total_requests: u64,
-    pub error_rate: f64,
-    pub avg_latency_ms: f64,
-}
-
-impl Default for HealthStatus {
-    fn default() -> Self {
-        Self {
-            status: "healthy".to_string(),
-            total_requests: 0,
-            error_rate: 0.0,
-            avg_latency_ms: 0.0,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -179,9 +118,10 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_collector() {
         let collector = MetricsCollector::new();
+        let logger = crate::logging::RequestLogger::new();
         
         // 记录一些请求
-        let tracker = collector.logger.start_request("test-1".to_string());
+        let tracker = logger.start_request("test-1".to_string());
         tracker
             .complete(
                 "anthropic".to_string(),
@@ -193,7 +133,7 @@ mod tests {
             )
             .await;
         
-        let tracker = collector.logger.start_request("test-2".to_string());
+        let tracker = logger.start_request("test-2".to_string());
         tracker
             .complete_error(
                 "openai".to_string(),
@@ -204,18 +144,10 @@ mod tests {
             )
             .await;
         
-        let metrics = collector.collect_metrics(60).await;
+        let metrics = collector.collect_metrics_with_logger(&logger, 60).await;
         
         assert_eq!(metrics.total_requests, 2);
         assert_eq!(metrics.success_rate, 50.0);
         assert_eq!(metrics.error_rate, 50.0);
-    }
-
-    #[tokio::test]
-    async fn test_health_status() {
-        let collector = MetricsCollector::new();
-        
-        let status = collector.get_health_status().await;
-        assert_eq!(status.status, "healthy");
     }
 }

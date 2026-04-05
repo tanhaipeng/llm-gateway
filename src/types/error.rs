@@ -18,18 +18,6 @@ pub enum GatewayError {
     #[error("YAML error: {0}")]
     YamlError(#[from] serde_yaml::Error),
 
-    // Provider 错误
-    #[error("Provider error: {0}")]
-    ProviderError(String),
-
-    // 请求错误
-    #[error("Invalid request: {0}")]
-    InvalidRequest(String),
-
-    // 超时错误
-    #[error("Request timeout")]
-    Timeout,
-
     // 流式错误
     #[error("Stream error: {0}")]
     StreamError(#[from] crate::types::stream::StreamError),
@@ -38,5 +26,3 @@ pub enum GatewayError {
     #[error("HTTP error: {0}")]
     HttpError2(#[from] axum::http::Error),
 }
-
-pub type Result<T> = std::result::Result<T, GatewayError>;

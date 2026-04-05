@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -159,12 +159,6 @@ impl RequestLogger {
     pub async fn get_stats(&self) -> RequestStats {
         self.stats.read().await.clone()
     }
-
-    /// 重置统计信息
-    pub async fn reset_stats(&self) {
-        let mut stats = self.stats.write().await;
-        *stats = RequestStats::default();
-    }
 }
 
 /// 请求跟踪器
@@ -221,11 +215,6 @@ impl RequestTracker {
                 error_message,
             )
             .await;
-    }
-
-    /// 获取已用时间
-    pub fn elapsed(&self) -> Duration {
-        self.start_time.elapsed()
     }
 }
 
