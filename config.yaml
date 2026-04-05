@@ -1,0 +1,52 @@
+# LLM Gateway 配置文件
+# 复制此文件为 config.yaml 并根据需要修改
+
+server:
+  address: "0.0.0.0"
+  port: 8080
+
+# Providers 配置
+# 注意：API keys 应该从环境变量加载，不要在此文件中直接配置
+providers:
+  openai:
+    models:
+      - "gpt-4"
+      - "gpt-4o"
+      - "gpt-4o-mini"
+      - "gpt-4-turbo"
+      - "gpt-3.5-turbo"
+    base-url: "https://api.openai.com"
+    version: null
+
+  anthropic:
+    models:
+      - "claude-3-5-sonnet"
+      - "claude-3-5-haiku"
+      - "claude-3-opus"
+      - "claude-3-sonnet"
+    base-url: "https://api.anthropic.com"
+    version: "2023-06-01"
+
+  # 取消注释以下 provider 并配置相应的 API keys 来使用
+  
+  # mistral:
+  #   models:
+  #     - "ministral-8b"
+  #     - "mistral-small"
+  #     - "mistral-medium"
+  #     - "mistral-large"
+  #     - "codestral"
+  #   base-url: "https://api.mistral.ai"
+
+  # groq:
+  #   models:
+  #     - "gemma2-9b-it"
+  #     - "llama-3.1-8b-instant"
+  #     - "llama-3.3-70b-versatile"
+  #   base-url: "https://api.groq.com/openai"
+
+  # deepseek:
+  #   models:
+  #     - "deepseek-chat"
+  #     - "deepseek-reasoner"
+  #   base-url: "https://api.deepseek.com"

@@ -1,0 +1,76 @@
+# LLM Gateway 配置文件示例
+
+server:
+  address: "0.0.0.0"
+  port: 8080
+
+# Providers 配置
+providers:
+  # OpenAI (内置)
+  openai:
+    models:
+      - "gpt-4"
+      - "gpt-4o"
+      - "gpt-4o-mini"
+      - "gpt-4-turbo"
+      - "gpt-3.5-turbo"
+    base-url: "https://api.openai.com"
+    # api_key: 从 OPENAI_API_KEY 环境变量加载
+    version: null
+
+  # Anthropic (内置)
+  anthropic:
+    models:
+      - "claude-3-5-sonnet"
+      - "claude-3-5-haiku"
+      - "claude-3-opus"
+      - "claude-3-sonnet"
+    base-url: "https://api.anthropic.com"
+    # api_key: 从 ANTHROPIC_API_KEY 环境变量加载
+    version: "2023-06-01"
+
+  # Mistral (自定义 - OpenAI 兼容)
+  mistral:
+    models:
+      - "ministral-8b"
+      - "mistral-small"
+      - "mistral-medium"
+      - "mistral-large"
+      - "codestral"
+    base-url: "https://api.mistral.ai"
+    # api_key: 从 MISTRAL_API_KEY 环境变量加载
+
+  # Groq (自定义 - OpenAI 兼容)
+  groq:
+    models:
+      - "gemma2-9b-it"
+      - "llama-3.1-8b-instant"
+      - "llama-3.3-70b-versatile"
+    base-url: "https://api.groq.com/openai"
+    # api_key: 从 GROQ_API_KEY 环境变量加载
+
+  # DeepSeek (自定义 - OpenAI 兼容)
+  deepseek:
+    models:
+      - "deepseek-chat"
+      - "deepseek-reasoner"
+    base-url: "https://api.deepseek.com"
+    # api_key: 从 DEEPSEEK_API_KEY 环境变量加载
+
+  # xAI (自定义 - OpenAI 兼容)
+  xai:
+    models:
+      - "grok-3"
+      - "grok-3-mini"
+      - "grok-2-vision"
+    base-url: "https://api.x.ai"
+    # api_key: 从 XAI_API_KEY 环境变量加载
+
+  # 自定义 Provider 示例
+  # 任何 OpenAI 兼容的 API 都可以配置为自定义 provider
+  my-custom-provider:
+    models:
+      - "my-model-1"
+      - "my-model-2"
+    base-url: "https://api.my-custom-provider.com"
+    # api_key: 从 MY_CUSTOM_PROVIDER_API_KEY 环境变量加载
