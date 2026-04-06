@@ -1,14 +1,15 @@
 [package]
 name = "llm-gateway"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 
 [dependencies]
 # HTTP/Server
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 axum = "0.8"
-tokio = { version = "1.45", features = ["rt-multi-thread", "net", "time", "macros", "sync", "io-util"] }
+tokio = { version = "1.45", features = ["rt-multi-thread", "net", "time", "macros", "sync", "io-util", "signal"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower = { version = "0.5", features = ["limit"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

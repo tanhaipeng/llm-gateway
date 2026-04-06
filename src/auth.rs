@@ -6,15 +6,24 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+#[derive(Debug, Clone)]
+pub struct AuthState {
+    pub api_key: String,
+    pub metrics_require_auth: bool,
+}
+
 /// 认证中间件
 pub async fn auth_middleware(
-    State(api_key): State<String>,
+    State(auth): State<AuthState>,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, AuthError> {
-    // 跳过健康检查和监控端点
+    // 健康检查始终免认证
     let path = request.uri().path();
-    if path == "/health" || path == "/metrics" {
+    if path == "/health" {
+        return Ok(next.run(request).await);
+    }
+    if path == "/metrics" && !auth.metrics_require_auth {
         return Ok(next.run(request).await);
     }
 
@@ -33,7 +42,7 @@ pub async fn auth_middleware(
     // 验证 API key（支持 Bearer token 格式）
     let provided_key = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
 
-    if provided_key != api_key {
+    if provided_key != auth.api_key {
         return Err(AuthError::InvalidApiKey);
     }
 

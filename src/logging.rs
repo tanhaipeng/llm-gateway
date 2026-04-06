@@ -61,18 +61,8 @@ impl RequestLogger {
     }
 
     /// 记录请求成功
-    pub async fn record_success(
-        &self,
-        request_id: String,
-        provider: String,
-        model: String,
-        is_stream: bool,
-        status_code: u16,
-        duration_ms: u64,
-        prompt_tokens: u64,
-        completion_tokens: u64,
-    ) {
-        let total_tokens = prompt_tokens + completion_tokens;
+    pub async fn record_success(&self, event: RequestSuccessLog) {
+        let total_tokens = event.prompt_tokens + event.completion_tokens;
 
         // M-4: 先在独立作用域内持有写锁并更新统计，写锁释放后再调用 tracing::info!
         {
@@ -82,84 +72,81 @@ impl RequestLogger {
             stats.successful_requests += 1;
             stats.total_tokens += total_tokens;
             // M-5: 分别记录 prompt / completion
-            stats.total_prompt_tokens += prompt_tokens;
-            stats.total_completion_tokens += completion_tokens;
-            stats.total_duration_ms += duration_ms;
+            stats.total_prompt_tokens += event.prompt_tokens;
+            stats.total_completion_tokens += event.completion_tokens;
+            stats.total_duration_ms += event.duration_ms;
 
             *stats
                 .requests_by_provider
-                .entry(provider.clone())
+                .entry(event.provider.clone())
                 .or_insert(0) += 1;
             *stats
                 .requests_by_status
-                .entry(status_code.to_string())
+                .entry(event.status_code.to_string())
                 .or_insert(0) += 1;
 
             // H-1/H-2/H-3: 更新 per-provider 详细统计
-            let ps = stats.stats_by_provider.entry(provider.clone()).or_default();
+            let ps = stats
+                .stats_by_provider
+                .entry(event.provider.clone())
+                .or_default();
             ps.total_requests += 1;
             ps.successful_requests += 1;
             ps.total_tokens += total_tokens;
-            ps.total_prompt_tokens += prompt_tokens;
-            ps.total_completion_tokens += completion_tokens;
-            ps.total_duration_ms += duration_ms;
+            ps.total_prompt_tokens += event.prompt_tokens;
+            ps.total_completion_tokens += event.completion_tokens;
+            ps.total_duration_ms += event.duration_ms;
         } // 写锁在此释放
 
         tracing::info!(
-            request_id = %request_id,
-            provider = %provider,
-            model = %model,
-            status = status_code,
-            duration_ms = duration_ms,
-            prompt_tokens = prompt_tokens,
-            completion_tokens = completion_tokens,
-            is_stream = is_stream,
+            request_id = %event.request_id,
+            provider = %event.provider,
+            model = %event.model,
+            status = event.status_code,
+            duration_ms = event.duration_ms,
+            prompt_tokens = event.prompt_tokens,
+            completion_tokens = event.completion_tokens,
+            is_stream = event.is_stream,
             "Request completed"
         );
     }
 
     /// 记录请求失败
-    pub async fn record_error(
-        &self,
-        request_id: String,
-        provider: String,
-        model: String,
-        is_stream: bool,
-        status_code: u16,
-        duration_ms: u64,
-        error_message: String,
-    ) {
+    pub async fn record_error(&self, event: RequestErrorLog) {
         {
             let mut stats = self.stats.write().await;
 
             stats.total_requests += 1;
             stats.failed_requests += 1;
-            stats.total_duration_ms += duration_ms;
+            stats.total_duration_ms += event.duration_ms;
 
             *stats
                 .requests_by_provider
-                .entry(provider.clone())
+                .entry(event.provider.clone())
                 .or_insert(0) += 1;
             *stats
                 .requests_by_status
-                .entry(status_code.to_string())
+                .entry(event.status_code.to_string())
                 .or_insert(0) += 1;
 
             // H-1/H-2/H-3: 更新 per-provider 失败统计
-            let ps = stats.stats_by_provider.entry(provider.clone()).or_default();
+            let ps = stats
+                .stats_by_provider
+                .entry(event.provider.clone())
+                .or_default();
             ps.total_requests += 1;
             ps.failed_requests += 1;
-            ps.total_duration_ms += duration_ms;
+            ps.total_duration_ms += event.duration_ms;
         } // 写锁在此释放
 
         tracing::warn!(
-            request_id = %request_id,
-            provider = %provider,
-            model = %model,
-            status = status_code,
-            duration_ms = duration_ms,
-            is_stream = is_stream,
-            error = %error_message,
+            request_id = %event.request_id,
+            provider = %event.provider,
+            model = %event.model,
+            status = event.status_code,
+            duration_ms = event.duration_ms,
+            is_stream = event.is_stream,
+            error = %event.error_message,
             "Request failed"
         );
     }
@@ -190,8 +177,8 @@ impl RequestTracker {
     ) {
         let duration_ms = self.start_time.elapsed().as_millis() as u64;
         self.logger
-            .record_success(
-                self.request_id,
+            .record_success(RequestSuccessLog {
+                request_id: self.request_id,
                 provider,
                 model,
                 is_stream,
@@ -199,7 +186,7 @@ impl RequestTracker {
                 duration_ms,
                 prompt_tokens,
                 completion_tokens,
-            )
+            })
             .await;
     }
 
@@ -214,17 +201,40 @@ impl RequestTracker {
     ) {
         let duration_ms = self.start_time.elapsed().as_millis() as u64;
         self.logger
-            .record_error(
-                self.request_id,
+            .record_error(RequestErrorLog {
+                request_id: self.request_id,
                 provider,
                 model,
                 is_stream,
                 status_code,
                 duration_ms,
                 error_message,
-            )
+            })
             .await;
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestSuccessLog {
+    pub request_id: String,
+    pub provider: String,
+    pub model: String,
+    pub is_stream: bool,
+    pub status_code: u16,
+    pub duration_ms: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestErrorLog {
+    pub request_id: String,
+    pub provider: String,
+    pub model: String,
+    pub is_stream: bool,
+    pub status_code: u16,
+    pub duration_ms: u64,
+    pub error_message: String,
 }
 
 #[cfg(test)]

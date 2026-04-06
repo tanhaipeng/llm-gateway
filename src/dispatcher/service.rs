@@ -99,7 +99,7 @@ impl ProviderClient {
             .tcp_nodelay(true)
             .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
-            .map_err(|e| GatewayError::HttpError(e))?;
+            .map_err(GatewayError::HttpError)?;
 
         Ok(Self {
             client,

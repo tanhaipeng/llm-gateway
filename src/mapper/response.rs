@@ -599,9 +599,9 @@ impl ResponseMapper {
                     }
                 }
                 if delta.is_empty() {
-                    return Ok(None);
-                }
-                return Ok(Some(serde_json::to_string(&serde_json::json!({
+                    Ok(None)
+                } else {
+                    Ok(Some(serde_json::to_string(&serde_json::json!({
                     "id": state.message_id,
                     "object": "chat.completion.chunk",
                     "created": created,
@@ -611,7 +611,8 @@ impl ResponseMapper {
                         "delta": Value::Object(delta),
                         "finish_reason": null
                     }]
-                }))?));
+                    }))?))
+                }
             }
             "response.output_text.delta" => {
                 let delta = event
@@ -620,26 +621,27 @@ impl ResponseMapper {
                     .unwrap_or("")
                     .to_string();
                 if delta.is_empty() {
-                    return Ok(None);
-                }
-                let mut delta_obj = serde_json::Map::new();
-                if let Some(role) = take_role(state) {
-                    if let Some(v) = role.get("role") {
-                        delta_obj.insert("role".to_string(), v.clone());
+                    Ok(None)
+                } else {
+                    let mut delta_obj = serde_json::Map::new();
+                    if let Some(role) = take_role(state) {
+                        if let Some(v) = role.get("role") {
+                            delta_obj.insert("role".to_string(), v.clone());
+                        }
                     }
+                    delta_obj.insert("content".to_string(), Value::String(delta));
+                    Ok(Some(serde_json::to_string(&serde_json::json!({
+                        "id": state.message_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": state.model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": Value::Object(delta_obj),
+                            "finish_reason": null
+                        }]
+                    }))?))
                 }
-                delta_obj.insert("content".to_string(), Value::String(delta));
-                return Ok(Some(serde_json::to_string(&serde_json::json!({
-                    "id": state.message_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": state.model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": Value::Object(delta_obj),
-                        "finish_reason": null
-                    }]
-                }))?));
             }
             "response.output_item.added" => {
                 if let Some(item) = event.get("item") {
@@ -698,7 +700,7 @@ impl ResponseMapper {
                         }))?));
                     }
                 }
-                return Ok(None);
+                Ok(None)
             }
             "response.function_call_arguments.delta" => {
                 state.responses_has_tool_call = true;
@@ -740,7 +742,7 @@ impl ResponseMapper {
                         }]
                     }))?));
                 }
-                return Ok(None);
+                Ok(None)
             }
             "response.output_item.done" => {
                 if let Some(item) = event.get("item") {
@@ -780,7 +782,7 @@ impl ResponseMapper {
                         }
                     }
                 }
-                return Ok(None);
+                Ok(None)
             }
             "response.completed" => {
                 let response = event.get("response").unwrap_or(&Value::Null);
@@ -794,7 +796,7 @@ impl ResponseMapper {
                     .and_then(|u| u.get("output_tokens"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                return Ok(Some(serde_json::to_string(&serde_json::json!({
+                Ok(Some(serde_json::to_string(&serde_json::json!({
                     "id": state.message_id,
                     "object": "chat.completion.chunk",
                     "created": created,
@@ -809,21 +811,19 @@ impl ResponseMapper {
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens
                     }
-                }))?));
+                }))?))
             }
-            "response.incomplete" => {
-                return Ok(Some(serde_json::to_string(&serde_json::json!({
-                    "id": state.message_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": state.model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "length"
-                    }]
-                }))?));
-            }
+            "response.incomplete" => Ok(Some(serde_json::to_string(&serde_json::json!({
+                "id": state.message_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": state.model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "length"
+                }]
+            }))?)),
             "response.failed" | "error" => {
                 let error_message = event
                     .get("error")
@@ -831,7 +831,7 @@ impl ResponseMapper {
                     .and_then(|v| v.as_str())
                     .or_else(|| event.get("message").and_then(|v| v.as_str()))
                     .unwrap_or("responses stream failed");
-                return Ok(Some(serde_json::to_string(&serde_json::json!({
+                Ok(Some(serde_json::to_string(&serde_json::json!({
                     "id": state.message_id,
                     "object": "chat.completion.chunk",
                     "created": created,
@@ -845,9 +845,9 @@ impl ResponseMapper {
                         "message": error_message,
                         "type": "api_error"
                     }
-                }))?));
+                }))?))
             }
-            _ => return Ok(None),
+            _ => Ok(None),
         }
     }
 

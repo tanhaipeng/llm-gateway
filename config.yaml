@@ -4,6 +4,15 @@
 server:
   address: "0.0.0.0"
   port: 8080
+  request-timeout-seconds: 930
+  cors:
+    allow-any-origin: false
+    allow-origins: []  # backend-only 默认禁用跨域
+  limits:
+    max-in-flight-requests: 512
+    max-requests-per-second: 200
+  metrics:
+    require-auth: false
 
 # Providers 配置
 # 注意：API keys 应该从环境变量加载，不要在此文件中直接配置
@@ -30,9 +39,9 @@ providers:
   #     - "deepseek-reasoner"
   #   base-url: "https://api.deepseek.com"
 
-  # timesniper provider
-  timesniper:
-    models:
-      - "gpt-5.3-codex"
-    base-url: "https://api.xcode.best"
-    protocol: "responses"  # 如果该 provider 仅支持 /v1/responses，取消注释
+  # 自定义 provider 示例
+  # my-provider:
+  #   models:
+  #     - "gpt-4.1-mini"
+  #   base-url: "https://api.example.com"
+  #   protocol: "responses"  # 如果该 provider 仅支持 /v1/responses，取消注释

@@ -44,12 +44,11 @@ pub fn load_config() -> Result<Config, crate::types::GatewayError> {
 
 fn load_from_file(path: &str) -> Result<Config, crate::types::GatewayError> {
     // 尝试读取文件
-    let content =
-        std::fs::read_to_string(path).map_err(|e| crate::types::GatewayError::IoError(e))?;
+    let content = std::fs::read_to_string(path).map_err(crate::types::GatewayError::IoError)?;
 
     // 解析 YAML
     let config: Config =
-        serde_yml::from_str(&content).map_err(|e| crate::types::GatewayError::YamlError(e))?;
+        serde_yml::from_str(&content).map_err(crate::types::GatewayError::YamlError)?;
 
     Ok(config)
 }

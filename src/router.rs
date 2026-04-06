@@ -10,26 +10,31 @@ use bytes::Bytes;
 use std::sync::{atomic::Ordering, Arc};
 use uuid::Uuid;
 
-/// 共享状态类型：(Dispatcher, RequestLogger, 启动时间)
-type AppState = (Dispatcher, logging::RequestLogger, Arc<std::time::Instant>);
+#[derive(Clone)]
+pub struct AppState {
+    pub dispatcher: Dispatcher,
+    pub request_logger: logging::RequestLogger,
+    pub start_time: Arc<std::time::Instant>,
+    pub request_timeout_seconds: u64,
+}
 
 /// 性能监控端点处理器
-pub async fn metrics_handler(
-    State((_, request_logger, start_time)): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn metrics_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let collector = metrics::MetricsCollector::new();
-    let uptime_seconds = start_time.elapsed().as_secs();
+    let uptime_seconds = state.start_time.elapsed().as_secs();
     let metrics = collector
-        .collect_metrics_with_logger(&request_logger, uptime_seconds)
+        .collect_metrics_with_logger(&state.request_logger, uptime_seconds)
         .await;
     Json(serde_json::to_value(metrics).unwrap_or_default())
 }
 
 pub async fn proxy_handler(
-    State((dispatcher, request_logger, _start_time)): State<AppState>,
+    State(state): State<AppState>,
     Path(provider): Path<String>,
     body: Bytes,
 ) -> Response {
+    let dispatcher = &state.dispatcher;
+    let request_logger = &state.request_logger;
     let request_id = Uuid::new_v4().to_string();
     tracing::info!(request_id = %request_id, provider = %provider, "Forwarding request");
 
@@ -101,19 +106,22 @@ pub async fn proxy_handler(
 
     let tracker = request_logger.start_request(request_id.clone());
 
-    let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(930), async {
-        if is_stream {
-            provider_client
-                .forward_request_stream(body)
-                .await
-                .map(|(resp, counter)| (resp, Some(counter)))
-        } else {
-            provider_client
-                .forward_request(body)
-                .await
-                .map(|resp| (resp, None))
-        }
-    })
+    let timeout_result = tokio::time::timeout(
+        std::time::Duration::from_secs(state.request_timeout_seconds),
+        async {
+            if is_stream {
+                provider_client
+                    .forward_request_stream(body)
+                    .await
+                    .map(|(resp, counter)| (resp, Some(counter)))
+            } else {
+                provider_client
+                    .forward_request(body)
+                    .await
+                    .map(|resp| (resp, None))
+            }
+        },
+    )
     .await;
 
     match timeout_result {

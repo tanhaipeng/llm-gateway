@@ -2,6 +2,7 @@ use bytes::Bytes;
 use serde_json::Value;
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::types::Provider;
@@ -774,9 +775,9 @@ impl RequestMapper {
                         continue;
                     }
                     // C-6: 如果上一条消息已经是 user，将内容合并，避免连续 user 消息触发 Anthropic 400
-                    let last_is_user = anthropic_messages.last().map_or(false, |m| {
-                        m.get("role").and_then(|r| r.as_str()) == Some("user")
-                    });
+                    let last_is_user = anthropic_messages
+                        .last()
+                        .is_some_and(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
                     if last_is_user {
                         if let Some(last) = anthropic_messages.last_mut() {
                             // 将新的 user 内容追加到上一条消息
@@ -854,7 +855,7 @@ impl RequestMapper {
                     }
 
                     // C-6: 如果上一条消息已经是 assistant，将内容块合并
-                    let last_is_assistant = anthropic_messages.last().map_or(false, |m| {
+                    let last_is_assistant = anthropic_messages.last().is_some_and(|m| {
                         m.get("role").and_then(|r| r.as_str()) == Some("assistant")
                     });
                     if last_is_assistant {
@@ -890,12 +891,12 @@ impl RequestMapper {
                     };
 
                     // 如果前一条消息也是 tool_result user 消息，合并进去
-                    let last_is_tool_result = anthropic_messages.last().map_or(false, |last| {
+                    let last_is_tool_result = anthropic_messages.last().is_some_and(|last| {
                         last.get("role").and_then(|r| r.as_str()) == Some("user")
                             && last
                                 .get("content")
                                 .and_then(|c| c.as_array())
-                                .map_or(false, |arr| {
+                                .is_some_and(|arr| {
                                     arr.first()
                                         .and_then(|b| b.get("type"))
                                         .and_then(|t| t.as_str())
