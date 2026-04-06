@@ -70,7 +70,7 @@ curl -X POST "$BASE_URL/anthropic/v1/chat/completions" \
       {"role": "user", "content": "Hello! Please respond in one sentence."}
     ],
     "max_tokens": 50
-  }' 2>/dev/null | jq -r '.content[0].text'
+  }' 2>/dev/null | jq -r '.choices[0].message.content'
 echo ""
 echo ""
 

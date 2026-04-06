@@ -198,15 +198,16 @@ mod tests {
 
     #[test]
     fn test_empty_user_content_skipped() {
-        let result = convert(serde_json::json!({
+        let body = serde_json::json!({
             "model": "claude-haiku-4-5",
             "messages": [{
                 "role": "user",
                 "content": [{"type": "unsupported_part", "value": "x"}]
             }]
-        }));
-        let msgs = result["messages"].as_array().unwrap();
-        assert!(msgs.is_empty());
+        });
+        let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let err = RequestMapper::convert_request(&bytes, &Provider::Anthropic).unwrap_err();
+        assert!(matches!(err, crate::types::GatewayError::InvalidRequest(_)));
     }
 
     #[test]
@@ -233,6 +234,104 @@ mod tests {
         assert_eq!(tr_block["type"], "tool_result");
         // content should be an array, not a string
         assert!(tr_block["content"].is_array());
+    }
+
+    #[test]
+    fn test_assistant_array_text_content_preserved() {
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Part 1"},
+                        {"type": "text", "text": "Part 2"}
+                    ]
+                }
+            ]
+        }));
+        let msgs = result["messages"].as_array().unwrap();
+        let assistant = &msgs[1];
+        assert_eq!(assistant["role"], "assistant");
+        let blocks = assistant["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "Part 1");
+        assert_eq!(blocks[1]["text"], "Part 2");
+    }
+
+    #[test]
+    fn test_empty_messages_after_mapping_returns_invalid_request() {
+        let body = serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "unsupported_part", "value": "x"}]
+            }]
+        });
+        let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let err = RequestMapper::convert_request(&bytes, &Provider::Anthropic).unwrap_err();
+        match err {
+            crate::types::GatewayError::InvalidRequest(msg) => {
+                assert!(msg.contains("No valid messages"));
+            }
+            other => panic!("unexpected error: {}", other),
+        }
+    }
+
+    #[test]
+    fn test_invalid_tool_arguments_returns_invalid_request() {
+        let body = serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "fn", "arguments": "{not-json"}
+                    }]
+                }
+            ]
+        });
+        let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let err = RequestMapper::convert_request(&bytes, &Provider::Anthropic).unwrap_err();
+        match err {
+            crate::types::GatewayError::InvalidRequest(msg) => {
+                assert!(msg.contains("Invalid tool call arguments JSON"));
+            }
+            other => panic!("unexpected error: {}", other),
+        }
+    }
+
+    #[test]
+    fn test_non_object_tool_arguments_returns_invalid_request() {
+        let body = serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "fn", "arguments": "[]"}
+                    }]
+                }
+            ]
+        });
+        let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let err = RequestMapper::convert_request(&bytes, &Provider::Anthropic).unwrap_err();
+        match err {
+            crate::types::GatewayError::InvalidRequest(msg) => {
+                assert!(msg.contains("expected object"));
+            }
+            other => panic!("unexpected error: {}", other),
+        }
     }
 }
 
@@ -418,17 +517,8 @@ impl RequestMapper {
                     }
                 }
                 "assistant" => {
-                    let mut content_blocks: Vec<Value> = Vec::new();
-
-                    // 文本内容（非空才添加）
-                    if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
-                        if !text.is_empty() {
-                            content_blocks.push(serde_json::json!({
-                                "type": "text",
-                                "text": text
-                            }));
-                        }
-                    }
+                    let mut content_blocks =
+                        Self::convert_openai_assistant_content(msg.get("content"));
 
                     // 转换 tool_calls → Anthropic tool_use 内容块
                     // OpenAI: [{id, type:"function", function:{name, arguments}}]
@@ -442,11 +532,13 @@ impl RequestMapper {
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("");
                             // arguments 是 JSON 字符串，需要解析为对象
-                            let input = func
+                            let input = match func
                                 .and_then(|f| f.get("arguments"))
                                 .and_then(|a| a.as_str())
-                                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                                .unwrap_or_else(|| serde_json::json!({}));
+                            {
+                                Some(raw) => Self::parse_tool_arguments(raw)?,
+                                None => serde_json::json!({}),
+                            };
                             content_blocks.push(serde_json::json!({
                                 "type": "tool_use",
                                 "id": id,
@@ -538,6 +630,14 @@ impl RequestMapper {
         }
 
         anthropic_json["messages"] = Value::Array(anthropic_messages);
+        if anthropic_json["messages"]
+            .as_array()
+            .is_some_and(|arr| arr.is_empty())
+        {
+            return Err(crate::types::GatewayError::InvalidRequest(
+                "No valid messages after request mapping".to_string(),
+            ));
+        }
 
         // 合并所有 system 消息
         if !system_parts.is_empty() {
@@ -631,6 +731,51 @@ impl RequestMapper {
                 Value::Array(blocks)
             }
             _ => Value::String(String::new()),
+        }
+    }
+
+    fn convert_openai_assistant_content(content: Option<&Value>) -> Vec<Value> {
+        match content {
+            Some(Value::String(text)) if !text.is_empty() => {
+                vec![serde_json::json!({ "type": "text", "text": text })]
+            }
+            Some(Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|part| {
+                    let type_ = part.get("type").and_then(|t| t.as_str())?;
+                    if type_ == "text" {
+                        part.get("text").and_then(|t| t.as_str()).map(|text| {
+                            serde_json::json!({
+                                "type": "text",
+                                "text": text
+                            })
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn parse_tool_arguments(raw: &str) -> Result<Value, crate::types::GatewayError> {
+        match serde_json::from_str::<Value>(raw) {
+            Ok(Value::Object(obj)) => Ok(Value::Object(obj)),
+            Ok(_) => Err(crate::types::GatewayError::InvalidRequest(
+                "Invalid tool call arguments JSON: expected object".to_string(),
+            )),
+            Err(e) => {
+                let preview: String = raw.chars().take(256).collect();
+                tracing::warn!(
+                    error = %e,
+                    arguments = %preview,
+                    "Invalid tool call arguments JSON"
+                );
+                Err(crate::types::GatewayError::InvalidRequest(
+                    "Invalid tool call arguments JSON".to_string(),
+                ))
+            }
         }
     }
 

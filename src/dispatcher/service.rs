@@ -7,14 +7,21 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
+use tokio::sync::Notify;
+
+const MAX_SSE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 /// 流式 token 计数器（AtomicU64 避免锁竞争）
 /// `done` 标志在流完全处理完毕后置 true，让后台任务立即退出而不是等 900s
 pub struct StreamTokenCounter {
     pub prompt: AtomicU64,
     pub completion: AtomicU64,
+    /// 流处理中是否出现错误（读流错误、provider error 事件等）
+    pub errored: AtomicBool,
     /// 流处理完毕信号（无论成功/错误/[DONE]）
     pub done: AtomicBool,
+    /// 用于通知等待方（router）流已结束，避免轮询
+    pub notify: Notify,
 }
 
 impl StreamTokenCounter {
@@ -22,8 +29,49 @@ impl StreamTokenCounter {
         Arc::new(Self {
             prompt: AtomicU64::new(0),
             completion: AtomicU64::new(0),
+            errored: AtomicBool::new(false),
             done: AtomicBool::new(false),
+            notify: Notify::new(),
         })
+    }
+
+    fn mark_done(&self) {
+        self.done.store(true, Ordering::Release);
+        // 使用 notify_one 保留 permit，避免先完成后等待时丢唤醒
+        self.notify.notify_one();
+    }
+
+    fn mark_error(&self) {
+        self.errored.store(true, Ordering::Release);
+        self.mark_done();
+    }
+}
+
+fn append_sse_text_with_limit(buf: &mut String, text: &str) -> Result<(), GatewayError> {
+    // 统一换行符，兼容 \r\n 的 SSE 实现
+    if text.contains('\r') {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        buf.push_str(&normalized);
+    } else {
+        buf.push_str(text);
+    }
+
+    if buf.len() > MAX_SSE_BUFFER_BYTES {
+        return Err(GatewayError::StreamError(
+            crate::types::stream::StreamError::BodyError("SSE buffer exceeded limit".to_string()),
+        ));
+    }
+    Ok(())
+}
+
+struct StreamCompletionGuard {
+    counter: Arc<StreamTokenCounter>,
+}
+
+impl Drop for StreamCompletionGuard {
+    fn drop(&mut self) {
+        // 无论是正常结束还是客户端提前断开，只要流对象被 drop，就应结束等待
+        self.counter.mark_done();
     }
 }
 
@@ -237,7 +285,7 @@ impl ProviderClient {
             let error_body = response.text().await.unwrap_or_else(|e| e.to_string());
             let counter = StreamTokenCounter::new();
             // 标记为 done，后台任务不会等待
-            counter.done.store(true, Ordering::Release);
+            counter.mark_done();
             return Ok((Self::build_error_response(status, &error_body), counter));
         }
 
@@ -253,23 +301,27 @@ impl ProviderClient {
             })
         });
 
-        // 在字节流末尾追加哨兵 "\n\n"，确保最后一帧被刷出
+        // 在字节流末尾追加哨兵，确保最后一帧被刷出并能标记 done
         let byte_stream_with_sentinel = byte_stream.chain(futures::stream::once(async {
-            Ok::<bytes::Bytes, GatewayError>(bytes::Bytes::from("\n\n"))
+            Ok::<bytes::Bytes, GatewayError>(bytes::Bytes::from(":__LLM_GATEWAY_EOF__\n\n"))
         }));
 
         let converted_stream = Box::pin({
             let mut buf = String::new();
             let mut stream_state = StreamState::new();
+            let completion_guard = StreamCompletionGuard {
+                counter: token_counter_clone.clone(),
+            };
 
             byte_stream_with_sentinel.flat_map(move |result| {
+                let _keep_guard_alive = &completion_guard;
                 let token_counter_inner = token_counter_clone.clone();
                 let provider = provider_clone.clone();
 
                 match result {
                     Err(e) => {
                         // 流出错，标记 done 让后台任务立即退出
-                        token_counter_inner.done.store(true, Ordering::Release);
+                        token_counter_inner.mark_error();
                         futures::stream::iter(vec![Err(e)])
                     }
                     Ok(bytes) => {
@@ -279,7 +331,15 @@ impl ProviderClient {
                         if text.contains('\u{FFFD}') {
                             tracing::warn!("Non-UTF-8 bytes in SSE stream, data may be corrupted");
                         }
-                        buf.push_str(&text);
+                        if let Err(e) = append_sse_text_with_limit(&mut buf, &text) {
+                            token_counter_inner.mark_error();
+                            tracing::warn!(
+                                current = buf.len(),
+                                max = MAX_SSE_BUFFER_BYTES,
+                                "SSE buffer exceeded limit"
+                            );
+                            return futures::stream::iter(vec![Err(e)]);
+                        }
 
                         let mut output: Vec<Result<bytes::Bytes, GatewayError>> =
                             Vec::new();
@@ -293,22 +353,42 @@ impl ProviderClient {
                                 continue;
                             }
 
-                            // 从 SSE 帧中提取 data: 行（忽略 event:/id:/comment 行）
-                            let data_line = frame
-                                .lines()
-                                .find(|line| line.starts_with("data:"))
-                                .map(|line| line.trim_start_matches("data:").trim());
+                            // 内部 EOF 哨兵：上游正常 EOF 也要显式结束，避免后台任务等待 900s
+                            if frame.trim() == ":__LLM_GATEWAY_EOF__" {
+                                token_counter_inner.mark_done();
+                                continue;
+                            }
 
-                            let json_str = match data_line {
-                                None => continue,
-                                Some(s) => s,
-                            };
+                            // 从 SSE 帧中提取全部 data: 行（SSE 允许多行 data）
+                            let data_lines: Vec<&str> = frame
+                                .lines()
+                                .filter_map(|line| {
+                                    line.strip_prefix("data:")
+                                        .map(|s| s.strip_prefix(' ').unwrap_or(s))
+                                })
+                                .collect();
+                            if data_lines.is_empty() {
+                                continue;
+                            }
+                            let json_owned = data_lines.join("\n");
+                            let json_str = json_owned.as_str();
 
                             // [DONE] 终止信号 — 标记流完毕
                             if json_str == "[DONE]" {
-                                token_counter_inner.done.store(true, Ordering::Release);
+                                token_counter_inner.mark_done();
                                 output.push(Ok(bytes::Bytes::from("data: [DONE]\n\n")));
                                 continue;
+                            }
+
+                            // provider 侧流式错误/结束事件
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
+                                    if t == "error" {
+                                        token_counter_inner.mark_error();
+                                    } else if t == "message_stop" {
+                                        token_counter_inner.mark_done();
+                                    }
+                                }
                             }
 
                             match ResponseMapper::convert_stream_chunk(json_str, &provider, &mut stream_state) {
@@ -394,5 +474,59 @@ impl Dispatcher {
 
     pub fn get_provider(&self, name: &str) -> Option<&ProviderClient> {
         self.providers.get(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn test_stream_counter_mark_done_notifies() {
+        let counter = StreamTokenCounter::new();
+        let notified = counter.notify.notified();
+        counter.mark_done();
+        notified.await;
+        assert!(counter.done.load(Ordering::Acquire));
+        assert!(!counter.errored.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn test_stream_counter_mark_error_sets_flags_and_notifies() {
+        let counter = StreamTokenCounter::new();
+        let notified = counter.notify.notified();
+        counter.mark_error();
+        notified.await;
+        assert!(counter.done.load(Ordering::Acquire));
+        assert!(counter.errored.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn test_stream_counter_mark_done_before_wait_is_not_lost() {
+        let counter = StreamTokenCounter::new();
+        counter.mark_done();
+        let waited = timeout(Duration::from_millis(50), counter.notify.notified()).await;
+        assert!(waited.is_ok());
+        assert!(counter.done.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_append_sse_text_with_limit_returns_error_when_exceeded() {
+        let mut buf = "a".repeat(MAX_SSE_BUFFER_BYTES - 2);
+        assert!(append_sse_text_with_limit(&mut buf, "xy").is_ok());
+        let err = append_sse_text_with_limit(&mut buf, "z").unwrap_err();
+        assert!(matches!(
+            err,
+            GatewayError::StreamError(crate::types::stream::StreamError::BodyError(_))
+        ));
+    }
+
+    #[test]
+    fn test_append_sse_text_with_limit_normalizes_crlf() {
+        let mut buf = String::new();
+        append_sse_text_with_limit(&mut buf, "data: 1\r\ndata: 2\r\r\n")
+            .expect("append_sse_text_with_limit should normalize CRLF");
+        assert_eq!(buf, "data: 1\ndata: 2\n\n");
     }
 }

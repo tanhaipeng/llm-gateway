@@ -13,19 +13,31 @@ pub fn load_config() -> Result<Config, crate::types::GatewayError> {
             tracing::info!("Successfully loaded config from file: {}", config_path);
             config
         }
-        Err(e) => {
+        Err(crate::types::GatewayError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::warn!(
-                "Failed to load config from file '{}': {}. Falling back to env variables.",
+                "Config file '{}' not found. Falling back to env variables.",
+                config_path
+            );
+            load_from_env()
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to load config from file '{}': {}. Refusing to start.",
                 config_path,
                 e
             );
-            // 回退到环境变量配置
-            load_from_env()
+            return Err(e);
         }
     };
 
     // 从环境变量加载或覆盖 API keys
     let config = load_api_keys_from_env(config);
+
+    if config.providers.is_empty() {
+        return Err(crate::types::GatewayError::InvalidConfig(
+            "No providers configured. Define at least one provider in config file or set provider API keys in environment variables.".to_string(),
+        ));
+    }
 
     Ok(config)
 }

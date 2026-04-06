@@ -168,36 +168,6 @@ impl RequestLogger {
     pub async fn get_stats(&self) -> RequestStats {
         self.stats.read().await.clone()
     }
-
-    /// 补充 token 统计（用于流式请求在流结束后异步更新）
-    /// M-5: 分别追踪 prompt / completion，并更新 provider 维度
-    pub async fn add_tokens_for_provider(
-        &self,
-        provider: &str,
-        prompt_tokens: u64,
-        completion_tokens: u64,
-    ) {
-        let total = prompt_tokens + completion_tokens;
-        if total > 0 {
-            let mut stats = self.stats.write().await;
-            stats.total_tokens += total;
-            stats.total_prompt_tokens += prompt_tokens;
-            stats.total_completion_tokens += completion_tokens;
-            let ps = stats
-                .stats_by_provider
-                .entry(provider.to_string())
-                .or_default();
-            ps.total_tokens += total;
-            ps.total_prompt_tokens += prompt_tokens;
-            ps.total_completion_tokens += completion_tokens;
-            tracing::debug!(
-                provider = provider,
-                prompt_tokens = prompt_tokens,
-                completion_tokens = completion_tokens,
-                "Stream token usage recorded"
-            );
-        }
-    }
 }
 
 /// 请求跟踪器
@@ -314,19 +284,5 @@ mod tests {
         assert_eq!(stats.failed_requests, 1);
         let ps = &stats.stats_by_provider["openai"];
         assert_eq!(ps.failed_requests, 1);
-    }
-
-    #[tokio::test]
-    async fn test_add_tokens_tracks_both() {
-        let logger = RequestLogger::new();
-        logger.add_tokens_for_provider("anthropic", 50, 150).await;
-        let stats = logger.get_stats().await;
-        assert_eq!(stats.total_prompt_tokens, 50);
-        assert_eq!(stats.total_completion_tokens, 150);
-        assert_eq!(stats.total_tokens, 200);
-        let ps = &stats.stats_by_provider["anthropic"];
-        assert_eq!(ps.total_prompt_tokens, 50);
-        assert_eq!(ps.total_completion_tokens, 150);
-        assert_eq!(ps.total_tokens, 200);
     }
 }

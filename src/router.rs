@@ -3,6 +3,7 @@ use crate::logging;
 use crate::metrics;
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
 use bytes::Bytes;
@@ -33,7 +34,17 @@ pub async fn proxy_handler(
     tracing::info!(request_id = %request_id, provider = %provider, "Forwarding request");
 
     if body.is_empty() {
-        return (axum::http::StatusCode::BAD_REQUEST, "Request body is empty").into_response();
+        let tracker = request_logger.start_request(request_id.clone());
+        tracker
+            .complete_error(
+                provider.clone(),
+                "unknown".to_string(),
+                false,
+                400,
+                "Request body is empty".to_string(),
+            )
+            .await;
+        return error_json_response(StatusCode::BAD_REQUEST, "Request body is empty");
     }
 
     // 解析请求元数据
@@ -51,11 +62,20 @@ pub async fn proxy_handler(
             (model, is_stream)
         }
         Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                format!("Invalid request body: {}", e),
-            )
-                .into_response();
+            let tracker = request_logger.start_request(request_id.clone());
+            tracker
+                .complete_error(
+                    provider.clone(),
+                    "unknown".to_string(),
+                    false,
+                    400,
+                    format!("Invalid request body: {}", e),
+                )
+                .await;
+            return error_json_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid request body: {}", e),
+            );
         }
     };
 
@@ -73,11 +93,10 @@ pub async fn proxy_handler(
                 format!("Provider not found: {}", provider),
             )
             .await;
-        return (
-            axum::http::StatusCode::NOT_FOUND,
-            format!("Provider not found: {}", provider),
-        )
-            .into_response();
+        return error_json_response(
+            StatusCode::NOT_FOUND,
+            &format!("Provider not found: {}", provider),
+        );
     };
 
     let tracker = request_logger.start_request(request_id.clone());
@@ -109,17 +128,26 @@ pub async fn proxy_handler(
                     "Request timeout".to_string(),
                 )
                 .await;
-            (axum::http::StatusCode::GATEWAY_TIMEOUT, "Request timeout").into_response()
+            error_json_response(StatusCode::GATEWAY_TIMEOUT, "Request timeout")
         }
 
-        Ok(Err(e)) => {
-            let msg = format!("Provider error: {}", e);
-            tracing::error!(request_id = %request_id, error = %msg);
-            tracker
-                .complete_error(provider.clone(), model.clone(), is_stream, 502, msg.clone())
-                .await;
-            (axum::http::StatusCode::BAD_GATEWAY, msg).into_response()
-        }
+        Ok(Err(e)) => match e {
+            crate::types::GatewayError::InvalidRequest(msg) => {
+                tracing::warn!(request_id = %request_id, error = %msg, "Invalid mapped request");
+                tracker
+                    .complete_error(provider.clone(), model.clone(), is_stream, 400, msg.clone())
+                    .await;
+                error_json_response(StatusCode::BAD_REQUEST, &msg)
+            }
+            other => {
+                let msg = format!("Provider error: {}", other);
+                tracing::error!(request_id = %request_id, error = %msg);
+                tracker
+                    .complete_error(provider.clone(), model.clone(), is_stream, 502, msg.clone())
+                    .await;
+                error_json_response(StatusCode::BAD_GATEWAY, &msg)
+            }
+        },
 
         Ok(Ok((response, stream_counter))) => {
             let status_code = response.status().as_u16();
@@ -169,16 +197,12 @@ pub async fn proxy_handler(
                                 msg.clone(),
                             )
                             .await;
-                        (axum::http::StatusCode::BAD_GATEWAY, msg).into_response()
+                        error_json_response(StatusCode::BAD_GATEWAY, &msg)
                     }
                 }
             } else {
-                // 流式：立即记录请求（token=0），后台补充 token
-                if is_http_success {
-                    tracker
-                        .complete(provider.clone(), model.clone(), true, status_code, 0, 0)
-                        .await;
-                } else {
+                // 流式：HTTP 非成功直接记失败；HTTP 成功则等流结束后再记成功/失败
+                if !is_http_success {
                     tracker
                         .complete_error(
                             provider.clone(),
@@ -188,29 +212,54 @@ pub async fn proxy_handler(
                             format!("Provider returned status {}", status_code),
                         )
                         .await;
-                }
-
-                if is_http_success {
+                } else {
                     if let Some(counter) = stream_counter {
-                        let logger_bg = request_logger.clone();
+                        let tracker_bg = tracker;
                         let provider_bg = provider.clone();
+                        let model_bg = model.clone();
                         tokio::spawn(async move {
-                            let poll = std::time::Duration::from_millis(100);
-                            let deadline =
-                                std::time::Instant::now() + std::time::Duration::from_secs(900);
-                            loop {
-                                tokio::time::sleep(poll).await;
-                                // C-2: exit as soon as stream signals done or deadline exceeded
-                                if counter.done.load(Ordering::Acquire)
-                                    || std::time::Instant::now() >= deadline
-                                {
-                                    let p = counter.prompt.load(Ordering::Relaxed);
-                                    let c = counter.completion.load(Ordering::Relaxed);
-                                    logger_bg.add_tokens_for_provider(&provider_bg, p, c).await;
-                                    break;
+                            if !counter.done.load(Ordering::Acquire) {
+                                let wait_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(900),
+                                    counter.notify.notified(),
+                                )
+                                .await;
+                                if wait_result.is_err() && !counter.done.load(Ordering::Acquire) {
+                                    tracker_bg
+                                        .complete_error(
+                                            provider_bg,
+                                            model_bg,
+                                            true,
+                                            504,
+                                            "Stream completion timeout".to_string(),
+                                        )
+                                        .await;
+                                    return;
                                 }
                             }
+
+                            if counter.errored.load(Ordering::Acquire) {
+                                tracker_bg
+                                    .complete_error(
+                                        provider_bg,
+                                        model_bg,
+                                        true,
+                                        502,
+                                        "Stream terminated with error".to_string(),
+                                    )
+                                    .await;
+                            } else {
+                                let p = counter.prompt.load(Ordering::Relaxed);
+                                let c = counter.completion.load(Ordering::Relaxed);
+                                tracker_bg
+                                    .complete(provider_bg, model_bg, true, status_code, p, c)
+                                    .await;
+                            }
                         });
+                    } else {
+                        tracker
+                            .complete(provider.clone(), model.clone(), true, status_code, 0, 0)
+                            .await;
                     }
                 }
 
@@ -246,4 +295,23 @@ fn extract_usage(bytes: &Bytes) -> (u64, u64) {
 
 pub async fn health_handler() -> &'static str {
     "OK"
+}
+
+fn error_json_response(status: StatusCode, message: &str) -> Response {
+    let error_type = if status.is_client_error() {
+        "invalid_request_error"
+    } else {
+        "api_error"
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "error": {
+                "message": message,
+                "type": error_type,
+                "code": status.as_u16().to_string()
+            }
+        })),
+    )
+        .into_response()
 }
