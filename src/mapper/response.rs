@@ -39,6 +39,25 @@ mod tests {
     }
 
     #[test]
+    fn test_text_delta_choice_index_is_zero() {
+        let mut state = StreamState::new();
+        let _ = ResponseMapper::convert_stream_chunk(
+            r#"{"type":"message_start","message":{"id":"msg_01","model":"claude-haiku-4-5","usage":{"input_tokens":10},"role":"assistant","content":[]}}"#,
+            &crate::types::Provider::Anthropic,
+            &mut state,
+        );
+        let result = ResponseMapper::convert_stream_chunk(
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Hello"}}"#,
+            &crate::types::Provider::Anthropic,
+            &mut state,
+        )
+        .unwrap()
+        .map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap())
+        .unwrap();
+        assert_eq!(result["choices"][0]["index"], 0);
+    }
+
+    #[test]
     fn test_tool_use_start() {
         let result = chunk(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"search"}}"#).unwrap();
         let tc = &result["choices"][0]["delta"]["tool_calls"][0];
@@ -79,9 +98,10 @@ mod tests {
     fn test_non_anthropic_passthrough() {
         let raw = r#"{"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}"#;
         let mut state = StreamState::new();
-        let result = ResponseMapper::convert_stream_chunk(raw, &crate::types::Provider::OpenAI, &mut state)
-            .unwrap()
-            .unwrap();
+        let result =
+            ResponseMapper::convert_stream_chunk(raw, &crate::types::Provider::OpenAI, &mut state)
+                .unwrap()
+                .unwrap();
         assert_eq!(result, raw);
     }
 
@@ -89,13 +109,16 @@ mod tests {
     fn test_anthropic_non_stream_tool_calls() {
         let anthropic = r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"tool_use","id":"toolu_01","name":"search","input":{"q":"rust"}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5}}"#;
         let result: serde_json::Value = serde_json::from_str(
-            &ResponseMapper::convert_response(anthropic, &crate::types::Provider::Anthropic).unwrap()
-        ).unwrap();
+            &ResponseMapper::convert_response(anthropic, &crate::types::Provider::Anthropic)
+                .unwrap(),
+        )
+        .unwrap();
         let tc = &result["choices"][0]["message"]["tool_calls"][0];
         assert_eq!(tc["type"], "function");
         assert_eq!(tc["function"]["name"], "search");
         // arguments 应是 JSON 字符串
-        let args: serde_json::Value = serde_json::from_str(tc["function"]["arguments"].as_str().unwrap()).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(tc["function"]["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(args["q"], "rust");
         assert_eq!(result["usage"]["prompt_tokens"], 10);
         assert_eq!(result["usage"]["completion_tokens"], 5);
@@ -118,7 +141,10 @@ mod tests {
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
             &crate::types::Provider::Anthropic,
             &mut state,
-        ).unwrap().map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap()).unwrap();
+        )
+        .unwrap()
+        .map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap())
+        .unwrap();
         assert_eq!(delta["id"], "msg_real_id");
         assert_eq!(delta["model"], "claude-opus-4");
     }
@@ -210,9 +236,8 @@ impl ResponseMapper {
             .get("content")
             .and_then(|c| c.as_array())
             .map(|arr| {
-                arr.iter().any(|item| {
-                    item.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                })
+                arr.iter()
+                    .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
             })
             .unwrap_or(false);
 
@@ -281,7 +306,9 @@ impl ResponseMapper {
                     .iter()
                     .filter_map(|item| {
                         if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                            item.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
                         } else {
                             None
                         }
@@ -303,10 +330,9 @@ impl ResponseMapper {
             for (index, item) in content.iter().enumerate() {
                 if item.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                     // Anthropic tool_use → OpenAI tool_calls
-                    let arguments = serde_json::to_string(
-                        item.get("input").unwrap_or(&serde_json::json!({})),
-                    )
-                    .unwrap_or_else(|_| "{}".to_string());
+                    let arguments =
+                        serde_json::to_string(item.get("input").unwrap_or(&serde_json::json!({})))
+                            .unwrap_or_else(|_| "{}".to_string());
 
                     tool_calls.push(serde_json::json!({
                         "index": index,
@@ -409,10 +435,8 @@ impl ResponseMapper {
 
                 if let Some(block) = content_block {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                        let tool_id =
-                            block.get("id").and_then(|id| id.as_str()).unwrap_or("");
-                        let tool_name =
-                            block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let tool_id = block.get("id").and_then(|id| id.as_str()).unwrap_or("");
+                        let tool_name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
 
                         // 使用独立的 tool_call_index（不用 content_block index，避免与文本块混淆）
                         let tc_index = state.tool_call_index;
@@ -448,27 +472,20 @@ impl ResponseMapper {
             }
 
             Some("content_block_delta") => {
-                let index = anthropic_json
-                    .get("index")
-                    .and_then(|i| i.as_u64())
-                    .unwrap_or(0) as u32;
                 let delta = anthropic_json.get("delta");
 
                 if let Some(delta_obj) = delta {
                     let delta_type = delta_obj.get("type").and_then(|t| t.as_str());
                     match delta_type {
                         Some("text_delta") => {
-                            let text = delta_obj
-                                .get("text")
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("");
+                            let text = delta_obj.get("text").and_then(|t| t.as_str()).unwrap_or("");
                             Some(serde_json::json!({
                                 "id": state.message_id,
                                 "object": "chat.completion.chunk",
                                 "created": chrono::Utc::now().timestamp(),
                                 "model": state.model,
                                 "choices": [{
-                                    "index": index,
+                                    "index": 0,
                                     "delta": { "content": text },
                                     "finish_reason": null
                                 }]

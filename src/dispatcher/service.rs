@@ -1,5 +1,5 @@
-use crate::mapper::{RequestMapper, ResponseMapper};
 use crate::mapper::response::StreamState;
+use crate::mapper::{RequestMapper, ResponseMapper};
 use crate::types::{Config, GatewayError, Provider, ProviderConfig, SSEStream};
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -90,8 +90,7 @@ impl ProviderClient {
                     request_builder = request_builder.header("x-api-key", api_key);
                 }
                 if let Some(version) = &self.config.version {
-                    request_builder =
-                        request_builder.header("anthropic-version", version);
+                    request_builder = request_builder.header("anthropic-version", version);
                 }
             }
         }
@@ -112,9 +111,7 @@ impl ProviderClient {
         };
         tracing::warn!(status = %status, body = %truncated, "Provider returned error");
 
-        let body = if let Ok(json) =
-            serde_json::from_str::<serde_json::Value>(error_body)
-        {
+        let body = if let Ok(json) = serde_json::from_str::<serde_json::Value>(error_body) {
             if let Some(error_obj) = json.get("error") {
                 serde_json::json!({
                     "error": {
@@ -222,10 +219,7 @@ impl ProviderClient {
     pub async fn forward_request_stream(
         &self,
         body: bytes::Bytes,
-    ) -> Result<
-        (axum::response::Response, Arc<StreamTokenCounter>),
-        GatewayError,
-    > {
+    ) -> Result<(axum::response::Response, Arc<StreamTokenCounter>), GatewayError> {
         let converted_body = RequestMapper::convert_request(&body, &self.provider)?;
         let url = self.build_url();
         let provider_clone = self.provider.clone();
@@ -253,9 +247,9 @@ impl ProviderClient {
         let byte_stream = response.bytes_stream().map(|result| {
             result.map_err(|e| {
                 tracing::warn!(error = %e, "Stream read error");
-                GatewayError::StreamError(
-                    crate::types::stream::StreamError::BodyError(e.to_string()),
-                )
+                GatewayError::StreamError(crate::types::stream::StreamError::BodyError(
+                    e.to_string(),
+                ))
             })
         });
 
@@ -386,11 +380,10 @@ impl Dispatcher {
 
         for (name, provider_config) in &config.providers {
             let provider = Provider::from_str(name)?;
-            let client = ProviderClient::new(provider, provider_config.clone())
-                .map_err(|e| {
-                    tracing::error!(provider = %name, error = %e, "Failed to create provider client");
-                    e
-                })?;
+            let client = ProviderClient::new(provider, provider_config.clone()).map_err(|e| {
+                tracing::error!(provider = %name, error = %e, "Failed to create provider client");
+                e
+            })?;
             providers.insert(name.clone(), client);
         }
 

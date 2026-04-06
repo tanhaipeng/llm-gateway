@@ -39,13 +39,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Arc::new(std::time::Instant::now());
 
     let config = load_config()?;
-    info!("Loaded configuration with {} providers", config.providers.len());
+    info!(
+        "Loaded configuration with {} providers",
+        config.providers.len()
+    );
     for (name, pc) in &config.providers {
         info!(
             "  Provider: {}, Models: {:?}, API Key: {}",
             name,
             pc.models,
-            if pc.api_key.is_some() { "Set" } else { "Not set" }
+            if pc.api_key.is_some() {
+                "Set"
+            } else {
+                "Not set"
+            }
         );
     }
 

@@ -4,9 +4,9 @@ use std::env;
 pub fn load_config() -> Result<Config, crate::types::GatewayError> {
     // 从环境变量获取配置文件路径，默认为 config.yaml
     let config_path = env::var("CONFIG_FILE").unwrap_or_else(|_| "config.yaml".to_string());
-    
+
     tracing::info!("Attempting to load config from: {}", config_path);
-    
+
     // 尝试从配置文件加载
     let config = match load_from_file(&config_path) {
         Ok(config) => {
@@ -14,7 +14,11 @@ pub fn load_config() -> Result<Config, crate::types::GatewayError> {
             config
         }
         Err(e) => {
-            tracing::warn!("Failed to load config from file '{}': {}. Falling back to env variables.", config_path, e);
+            tracing::warn!(
+                "Failed to load config from file '{}': {}. Falling back to env variables.",
+                config_path,
+                e
+            );
             // 回退到环境变量配置
             load_from_env()
         }
@@ -28,13 +32,13 @@ pub fn load_config() -> Result<Config, crate::types::GatewayError> {
 
 fn load_from_file(path: &str) -> Result<Config, crate::types::GatewayError> {
     // 尝试读取文件
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| crate::types::GatewayError::IoError(e))?;
-    
+    let content =
+        std::fs::read_to_string(path).map_err(|e| crate::types::GatewayError::IoError(e))?;
+
     // 解析 YAML
-    let config: Config = serde_yml::from_str(&content)
-        .map_err(|e| crate::types::GatewayError::YamlError(e))?;
-    
+    let config: Config =
+        serde_yml::from_str(&content).map_err(|e| crate::types::GatewayError::YamlError(e))?;
+
     Ok(config)
 }
 
@@ -89,11 +93,11 @@ fn load_api_keys_from_env(mut config: Config) -> Config {
     for (name, provider_config) in config.providers.iter_mut() {
         // 转换 provider name 为环境变量格式 (e.g., "mistral" -> "MISTRAL_API_KEY")
         let env_key = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
-        
+
         if let Ok(api_key) = env::var(&env_key) {
             provider_config.api_key = Some(api_key);
         }
     }
-    
+
     config
 }

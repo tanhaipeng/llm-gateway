@@ -3,7 +3,8 @@ use futures::Stream;
 use std::pin::Pin;
 
 /// 流式响应类型
-pub type BoxTryStream<I> = Pin<Box<dyn Stream<Item = Result<I, crate::types::GatewayError>> + Send>>;
+pub type BoxTryStream<I> =
+    Pin<Box<dyn Stream<Item = Result<I, crate::types::GatewayError>> + Send>>;
 pub type SSEStream = BoxTryStream<Bytes>;
 
 /// 流式响应错误

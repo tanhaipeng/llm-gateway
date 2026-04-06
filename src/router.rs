@@ -44,7 +44,10 @@ pub async fn proxy_handler(
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let is_stream = json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_stream = json
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             (model, is_stream)
         }
         Err(e) => {
@@ -62,8 +65,13 @@ pub async fn proxy_handler(
         tracing::error!(request_id = %request_id, provider = %provider, "Provider not found");
         let tracker = request_logger.start_request(request_id.clone());
         tracker
-            .complete_error(provider.clone(), model.clone(), is_stream, 404,
-                format!("Provider not found: {}", provider))
+            .complete_error(
+                provider.clone(),
+                model.clone(),
+                is_stream,
+                404,
+                format!("Provider not found: {}", provider),
+            )
             .await;
         return (
             axum::http::StatusCode::NOT_FOUND,
@@ -74,30 +82,32 @@ pub async fn proxy_handler(
 
     let tracker = request_logger.start_request(request_id.clone());
 
-    let timeout_result = tokio::time::timeout(
-        std::time::Duration::from_secs(930),
-        async {
-            if is_stream {
-                provider_client
-                    .forward_request_stream(body)
-                    .await
-                    .map(|(resp, counter)| (resp, Some(counter)))
-            } else {
-                provider_client
-                    .forward_request(body)
-                    .await
-                    .map(|resp| (resp, None))
-            }
-        },
-    )
+    let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(930), async {
+        if is_stream {
+            provider_client
+                .forward_request_stream(body)
+                .await
+                .map(|(resp, counter)| (resp, Some(counter)))
+        } else {
+            provider_client
+                .forward_request(body)
+                .await
+                .map(|resp| (resp, None))
+        }
+    })
     .await;
 
     match timeout_result {
         Err(_) => {
             tracing::error!(request_id = %request_id, "Request timed out");
             tracker
-                .complete_error(provider.clone(), model.clone(), is_stream, 504,
-                    "Request timeout".to_string())
+                .complete_error(
+                    provider.clone(),
+                    model.clone(),
+                    is_stream,
+                    504,
+                    "Request timeout".to_string(),
+                )
                 .await;
             (axum::http::StatusCode::GATEWAY_TIMEOUT, "Request timeout").into_response()
         }
@@ -113,6 +123,7 @@ pub async fn proxy_handler(
 
         Ok(Ok((response, stream_counter))) => {
             let status_code = response.status().as_u16();
+            let is_http_success = (200..400).contains(&status_code);
 
             if !is_stream {
                 // 非流式：读取完整响应体，提取 token
@@ -120,9 +131,28 @@ pub async fn proxy_handler(
                 match axum::body::to_bytes(resp_body, 10 * 1024 * 1024).await {
                     Ok(bytes) => {
                         let (prompt, completion) = extract_usage(&bytes);
-                        tracker
-                            .complete(provider.clone(), model.clone(), false, status_code, prompt, completion)
-                            .await;
+                        if is_http_success {
+                            tracker
+                                .complete(
+                                    provider.clone(),
+                                    model.clone(),
+                                    false,
+                                    status_code,
+                                    prompt,
+                                    completion,
+                                )
+                                .await;
+                        } else {
+                            tracker
+                                .complete_error(
+                                    provider.clone(),
+                                    model.clone(),
+                                    false,
+                                    status_code,
+                                    format!("Provider returned status {}", status_code),
+                                )
+                                .await;
+                        }
                         axum::http::Response::from_parts(parts, axum::body::Body::from(bytes))
                             .into_response()
                     }
@@ -131,33 +161,57 @@ pub async fn proxy_handler(
                         let msg = format!("Failed to read response body: {}", e);
                         tracing::error!(request_id = %request_id, error = %msg);
                         tracker
-                            .complete_error(provider.clone(), model.clone(), false, 502, msg.clone())
+                            .complete_error(
+                                provider.clone(),
+                                model.clone(),
+                                false,
+                                502,
+                                msg.clone(),
+                            )
                             .await;
                         (axum::http::StatusCode::BAD_GATEWAY, msg).into_response()
                     }
                 }
             } else {
                 // 流式：立即记录请求（token=0），后台补充 token
-                tracker
-                    .complete(provider.clone(), model.clone(), true, status_code, 0, 0)
-                    .await;
+                if is_http_success {
+                    tracker
+                        .complete(provider.clone(), model.clone(), true, status_code, 0, 0)
+                        .await;
+                } else {
+                    tracker
+                        .complete_error(
+                            provider.clone(),
+                            model.clone(),
+                            true,
+                            status_code,
+                            format!("Provider returned status {}", status_code),
+                        )
+                        .await;
+                }
 
-                if let Some(counter) = stream_counter {
-                    let logger_bg = request_logger.clone();
-                    tokio::spawn(async move {
-                        let poll = std::time::Duration::from_millis(100);
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
-                        loop {
-                            tokio::time::sleep(poll).await;
-                            // C-2: exit as soon as stream signals done or deadline exceeded
-                            if counter.done.load(Ordering::Acquire) || std::time::Instant::now() >= deadline {
-                                let p = counter.prompt.load(Ordering::Relaxed);
-                                let c = counter.completion.load(Ordering::Relaxed);
-                                logger_bg.add_tokens(p, c).await;
-                                break;
+                if is_http_success {
+                    if let Some(counter) = stream_counter {
+                        let logger_bg = request_logger.clone();
+                        let provider_bg = provider.clone();
+                        tokio::spawn(async move {
+                            let poll = std::time::Duration::from_millis(100);
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(900);
+                            loop {
+                                tokio::time::sleep(poll).await;
+                                // C-2: exit as soon as stream signals done or deadline exceeded
+                                if counter.done.load(Ordering::Acquire)
+                                    || std::time::Instant::now() >= deadline
+                                {
+                                    let p = counter.prompt.load(Ordering::Relaxed);
+                                    let c = counter.completion.load(Ordering::Relaxed);
+                                    logger_bg.add_tokens_for_provider(&provider_bg, p, c).await;
+                                    break;
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
 
                 response.into_response()
@@ -175,11 +229,13 @@ fn extract_usage(bytes: &Bytes) -> (u64, u64) {
         .and_then(|j| {
             let u = j.get("usage")?;
             // OpenAI 格式（经过 ResponseMapper 转换后）
-            let p = u.get("prompt_tokens")
+            let p = u
+                .get("prompt_tokens")
                 .and_then(|v| v.as_u64())
                 .or_else(|| u.get("input_tokens").and_then(|v| v.as_u64()))
                 .unwrap_or(0);
-            let c = u.get("completion_tokens")
+            let c = u
+                .get("completion_tokens")
                 .and_then(|v| v.as_u64())
                 .or_else(|| u.get("output_tokens").and_then(|v| v.as_u64()))
                 .unwrap_or(0);

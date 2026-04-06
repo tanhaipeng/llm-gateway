@@ -22,23 +22,21 @@ pub async fn auth_middleware(
     if request.method() == Method::OPTIONS {
         return Ok(next.run(request).await);
     }
-    
+
     // 获取 Authorization header
     let auth_header = request
         .headers()
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
         .ok_or(AuthError::MissingAuthHeader)?;
-    
+
     // 验证 API key（支持 Bearer token 格式）
-    let provided_key = auth_header
-        .strip_prefix("Bearer ")
-        .unwrap_or(auth_header);
-    
+    let provided_key = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
+
     if provided_key != api_key {
         return Err(AuthError::InvalidApiKey);
     }
-    
+
     Ok(next.run(request).await)
 }
 
@@ -54,11 +52,9 @@ impl IntoResponse for AuthError {
             AuthError::MissingAuthHeader => {
                 (StatusCode::UNAUTHORIZED, "Missing authorization header")
             }
-            AuthError::InvalidApiKey => {
-                (StatusCode::UNAUTHORIZED, "Invalid API key")
-            }
+            AuthError::InvalidApiKey => (StatusCode::UNAUTHORIZED, "Invalid API key"),
         };
-        
+
         let body = serde_json::json!({
             "error": {
                 "message": message,
@@ -66,7 +62,7 @@ impl IntoResponse for AuthError {
                 "code": status.as_u16().to_string()
             }
         });
-        
+
         (status, axum::Json(body)).into_response()
     }
 }

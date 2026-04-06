@@ -197,6 +197,19 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_user_content_skipped() {
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "unsupported_part", "value": "x"}]
+            }]
+        }));
+        let msgs = result["messages"].as_array().unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
     fn test_tool_result_array_content() {
         // H-5: tool_result content supports array format
         let result = convert(serde_json::json!({
@@ -361,10 +374,13 @@ impl RequestMapper {
                 }
                 "user" => {
                     let content = Self::convert_openai_user_content(msg.get("content"));
+                    if Self::is_empty_content(&content) {
+                        continue;
+                    }
                     // C-6: 如果上一条消息已经是 user，将内容合并，避免连续 user 消息触发 Anthropic 400
-                    let last_is_user = anthropic_messages
-                        .last()
-                        .map_or(false, |m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
+                    let last_is_user = anthropic_messages.last().map_or(false, |m| {
+                        m.get("role").and_then(|r| r.as_str()) == Some("user")
+                    });
                     if last_is_user {
                         if let Some(last) = anthropic_messages.last_mut() {
                             // 将新的 user 内容追加到上一条消息
@@ -374,7 +390,8 @@ impl RequestMapper {
                                 }
                                 (Value::Array(existing), Value::String(s)) => {
                                     if !s.is_empty() {
-                                        existing.push(serde_json::json!({"type": "text", "text": s}));
+                                        existing
+                                            .push(serde_json::json!({"type": "text", "text": s}));
                                     }
                                 }
                                 (Value::String(existing), Value::String(s)) => {
@@ -384,7 +401,9 @@ impl RequestMapper {
                                     }
                                 }
                                 (Value::String(existing_str), Value::Array(new_parts)) => {
-                                    let mut blocks = vec![serde_json::json!({"type": "text", "text": existing_str.clone()})];
+                                    let mut blocks = vec![
+                                        serde_json::json!({"type": "text", "text": existing_str.clone()}),
+                                    ];
                                     blocks.extend(new_parts.clone());
                                     last["content"] = Value::Array(blocks);
                                 }
@@ -414,9 +433,7 @@ impl RequestMapper {
                     // 转换 tool_calls → Anthropic tool_use 内容块
                     // OpenAI: [{id, type:"function", function:{name, arguments}}]
                     // Anthropic: [{type:"tool_use", id, name, input}]
-                    if let Some(tool_calls) =
-                        msg.get("tool_calls").and_then(|tc| tc.as_array())
-                    {
+                    if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
                         for tc in tool_calls {
                             let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
                             let func = tc.get("function");
@@ -448,9 +465,9 @@ impl RequestMapper {
                     }
 
                     // C-6: 如果上一条消息已经是 assistant，将内容块合并
-                    let last_is_assistant = anthropic_messages
-                        .last()
-                        .map_or(false, |m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"));
+                    let last_is_assistant = anthropic_messages.last().map_or(false, |m| {
+                        m.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                    });
                     if last_is_assistant {
                         if let Some(last) = anthropic_messages.last_mut() {
                             if let Some(arr) = last["content"].as_array_mut() {
@@ -484,19 +501,18 @@ impl RequestMapper {
                     };
 
                     // 如果前一条消息也是 tool_result user 消息，合并进去
-                    let last_is_tool_result =
-                        anthropic_messages.last().map_or(false, |last| {
-                            last.get("role").and_then(|r| r.as_str()) == Some("user")
-                                && last
-                                    .get("content")
-                                    .and_then(|c| c.as_array())
-                                    .map_or(false, |arr| {
-                                        arr.first()
-                                            .and_then(|b| b.get("type"))
-                                            .and_then(|t| t.as_str())
-                                            == Some("tool_result")
-                                    })
-                        });
+                    let last_is_tool_result = anthropic_messages.last().map_or(false, |last| {
+                        last.get("role").and_then(|r| r.as_str()) == Some("user")
+                            && last
+                                .get("content")
+                                .and_then(|c| c.as_array())
+                                .map_or(false, |arr| {
+                                    arr.first()
+                                        .and_then(|b| b.get("type"))
+                                        .and_then(|t| t.as_str())
+                                        == Some("tool_result")
+                                })
+                    });
 
                     let tool_result_block = serde_json::json!({
                         "type": "tool_result",
@@ -541,7 +557,9 @@ impl RequestMapper {
                     .iter()
                     .filter_map(|p| {
                         if p.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                            p.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
                         } else {
                             None
                         }
@@ -575,12 +593,8 @@ impl RequestMapper {
                         }
                         "image_url" => {
                             if let Some(image_url) = part.get("image_url") {
-                                if let Some(url) =
-                                    image_url.get("url").and_then(|u| u.as_str())
-                                {
-                                    if url.starts_with("http://")
-                                        || url.starts_with("https://")
-                                    {
+                                if let Some(url) = image_url.get("url").and_then(|u| u.as_str()) {
+                                    if url.starts_with("http://") || url.starts_with("https://") {
                                         // HTTP URL 图片
                                         blocks.push(serde_json::json!({
                                             "type": "image",
@@ -617,6 +631,14 @@ impl RequestMapper {
                 Value::Array(blocks)
             }
             _ => Value::String(String::new()),
+        }
+    }
+
+    fn is_empty_content(content: &Value) -> bool {
+        match content {
+            Value::String(s) => s.is_empty(),
+            Value::Array(arr) => arr.is_empty(),
+            _ => true,
         }
     }
 }
