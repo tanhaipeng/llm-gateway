@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let dispatcher = Dispatcher::new(&config);
+    let dispatcher = Dispatcher::new(&config)?;
     let request_logger = logging::RequestLogger::new();
     let gateway_api_key = std::env::var("GATEWAY_API_KEY").ok();
 

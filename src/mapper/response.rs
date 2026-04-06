@@ -17,6 +17,8 @@ mod tests {
         let result = chunk(r#"{"type":"message_start","message":{"id":"msg_01","model":"claude-haiku-4-5","usage":{"input_tokens":10},"role":"assistant","content":[]}}"#).unwrap();
         assert_eq!(result["model"], "claude-haiku-4-5");
         assert_eq!(result["choices"][0]["delta"]["role"], "assistant");
+        // H-4: content should NOT be present in the first chunk delta
+        assert!(result["choices"][0]["delta"].get("content").is_none());
     }
 
     #[test]
@@ -87,7 +89,7 @@ mod tests {
     fn test_anthropic_non_stream_tool_calls() {
         let anthropic = r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"tool_use","id":"toolu_01","name":"search","input":{"q":"rust"}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5}}"#;
         let result: serde_json::Value = serde_json::from_str(
-            &ResponseMapper::convert_response(anthropic, &crate::types::Provider::Anthropic, false).unwrap()
+            &ResponseMapper::convert_response(anthropic, &crate::types::Provider::Anthropic).unwrap()
         ).unwrap();
         let tc = &result["choices"][0]["message"]["tool_calls"][0];
         assert_eq!(tc["type"], "function");
@@ -175,7 +177,6 @@ impl ResponseMapper {
     pub fn convert_response(
         data: &str,
         source_provider: &crate::types::Provider,
-        _is_stream: bool,
     ) -> Result<String, crate::types::GatewayError> {
         match source_provider {
             crate::types::Provider::Anthropic => Self::anthropic_to_openai(data),
@@ -391,7 +392,7 @@ impl ResponseMapper {
                     "model": model,
                     "choices": [{
                         "index": 0,
-                        "delta": { "role": "assistant", "content": "" },
+                        "delta": { "role": "assistant" },
                         "finish_reason": null
                     }],
                     // 预填充 token 数（部分客户端依赖此字段）

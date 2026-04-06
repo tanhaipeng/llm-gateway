@@ -1,17 +1,20 @@
 use crate::mapper::{RequestMapper, ResponseMapper};
 use crate::mapper::response::StreamState;
-use crate::types::{Config, Provider, ProviderConfig, SSEStream};
+use crate::types::{Config, GatewayError, Provider, ProviderConfig, SSEStream};
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 
-/// 流式 token 计数器（用 AtomicU64 避免锁竞争）
+/// 流式 token 计数器（AtomicU64 避免锁竞争）
+/// `done` 标志在流完全处理完毕后置 true，让后台任务立即退出而不是等 900s
 pub struct StreamTokenCounter {
     pub prompt: AtomicU64,
     pub completion: AtomicU64,
+    /// 流处理完毕信号（无论成功/错误/[DONE]）
+    pub done: AtomicBool,
 }
 
 impl StreamTokenCounter {
@@ -19,6 +22,7 @@ impl StreamTokenCounter {
         Arc::new(Self {
             prompt: AtomicU64::new(0),
             completion: AtomicU64::new(0),
+            done: AtomicBool::new(false),
         })
     }
 }
@@ -36,29 +40,26 @@ pub struct ProviderClient {
 }
 
 impl ProviderClient {
-    pub fn new(provider: Provider, config: ProviderConfig) -> Self {
+    /// M-1: 返回 Result 而不是 expect panic
+    pub fn new(provider: Provider, config: ProviderConfig) -> Result<Self, GatewayError> {
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(10)
             .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .http2_keep_alive_interval(std::time::Duration::from_secs(30))
-            .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
-            .http2_keep_alive_while_idle(true)
             .timeout(std::time::Duration::from_secs(900))
             .connect_timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(5))
             .tcp_nodelay(true)
             .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| GatewayError::HttpError(e))?;
 
-        Self {
+        Ok(Self {
             client,
             config: Arc::new(config),
             provider,
-        }
+        })
     }
 
-    /// H-6: trim trailing slash from base_url to avoid double slashes
     fn build_url(&self) -> String {
         let base = self.config.base_url.trim_end_matches('/');
         if self.provider == Provider::Anthropic {
@@ -98,11 +99,19 @@ impl ProviderClient {
     }
 
     /// 构建统一的错误响应（透传真实 HTTP 状态码）
+    /// H-6: error_body 截断到 512 字符，避免将 provider 内部敏感信息写入日志
     fn build_error_response(
         status: reqwest::StatusCode,
         error_body: &str,
     ) -> axum::response::Response {
-        // 尝试解析 provider 的结构化错误
+        // H-6: 日志中截断错误体，避免泄露敏感内容
+        let truncated = if error_body.len() > 512 {
+            format!("{}…[truncated]", &error_body[..512])
+        } else {
+            error_body.to_string()
+        };
+        tracing::warn!(status = %status, body = %truncated, "Provider returned error");
+
         let body = if let Ok(json) =
             serde_json::from_str::<serde_json::Value>(error_body)
         {
@@ -111,7 +120,7 @@ impl ProviderClient {
                     "error": {
                         "message": error_obj.get("message")
                             .and_then(|m| m.as_str())
-                            .unwrap_or(error_body),
+                            .unwrap_or("Provider error"),
                         "type": error_obj.get("type")
                             .and_then(|t| t.as_str())
                             .unwrap_or("api_error"),
@@ -121,10 +130,10 @@ impl ProviderClient {
                     }
                 })
             } else {
-                serde_json::json!({"error": {"message": error_body, "type": "api_error", "code": status.as_u16().to_string()}})
+                serde_json::json!({"error": {"message": "Provider error", "type": "api_error", "code": status.as_u16().to_string()}})
             }
         } else {
-            serde_json::json!({"error": {"message": error_body, "type": "api_error", "code": status.as_u16().to_string()}})
+            serde_json::json!({"error": {"message": "Provider error", "type": "api_error", "code": status.as_u16().to_string()}})
         };
 
         axum::response::Response::builder()
@@ -145,7 +154,7 @@ impl ProviderClient {
     pub async fn forward_request(
         &self,
         body: bytes::Bytes,
-    ) -> Result<axum::response::Response, crate::types::GatewayError> {
+    ) -> Result<axum::response::Response, GatewayError> {
         let converted_body = RequestMapper::convert_request(&body, &self.provider)?;
         let url = self.build_url();
 
@@ -161,19 +170,29 @@ impl ProviderClient {
 
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_else(|e| e.to_string());
-            tracing::warn!(status = %status, body = %error_body, "Provider returned error");
             return Ok(Self::build_error_response(status, &error_body));
         }
 
         let body_bytes = response.bytes().await?;
-        let response_data = String::from_utf8_lossy(&body_bytes);
+
+        // C-3: 使用 from_utf8 而不是 from_utf8_lossy，避免静默修改损坏字节
+        let response_data = match std::str::from_utf8(&body_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                tracing::warn!("Provider response is not valid UTF-8, passing through raw bytes");
+                return Ok(axum::response::Response::builder()
+                    .status(status)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(axum::body::Body::from(body_bytes))?);
+            }
+        };
 
         let converted_response =
-            match ResponseMapper::convert_response(&response_data, &self.provider, false) {
+            match ResponseMapper::convert_response(&response_data, &self.provider) {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to convert response, passing through raw");
-                    response_data.to_string()
+                    response_data
                 }
             };
 
@@ -199,13 +218,13 @@ impl ProviderClient {
     }
 
     /// 流式请求转发
-    /// 返回 (Response, StreamTokenCounter)，调用方持有 counter 用于异步读取 token 数
+    /// 返回 (Response, StreamTokenCounter)
     pub async fn forward_request_stream(
         &self,
         body: bytes::Bytes,
     ) -> Result<
         (axum::response::Response, Arc<StreamTokenCounter>),
-        crate::types::GatewayError,
+        GatewayError,
     > {
         let converted_body = RequestMapper::convert_request(&body, &self.provider)?;
         let url = self.build_url();
@@ -222,8 +241,9 @@ impl ProviderClient {
 
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_else(|e| e.to_string());
-            tracing::warn!(status = %status, body = %error_body, "Provider returned error in stream request");
             let counter = StreamTokenCounter::new();
+            // 标记为 done，后台任务不会等待
+            counter.done.store(true, Ordering::Release);
             return Ok((Self::build_error_response(status, &error_body), counter));
         }
 
@@ -233,22 +253,19 @@ impl ProviderClient {
         let byte_stream = response.bytes_stream().map(|result| {
             result.map_err(|e| {
                 tracing::warn!(error = %e, "Stream read error");
-                crate::types::GatewayError::StreamError(
+                GatewayError::StreamError(
                     crate::types::stream::StreamError::BodyError(e.to_string()),
                 )
             })
         });
 
-        // C-1: 在字节流末尾追加一个哨兵 "\n\n"，确保最后一帧被刷出
+        // 在字节流末尾追加哨兵 "\n\n"，确保最后一帧被刷出
         let byte_stream_with_sentinel = byte_stream.chain(futures::stream::once(async {
-            Ok::<bytes::Bytes, crate::types::GatewayError>(bytes::Bytes::from("\n\n"))
+            Ok::<bytes::Bytes, GatewayError>(bytes::Bytes::from("\n\n"))
         }));
 
-        // SSE 帧缓冲器：Anthropic 的 SSE 帧可能跨多个 TCP chunk
-        // 按 \n\n 分割，从 data: 行提取 JSON 再转换
         let converted_stream = Box::pin({
             let mut buf = String::new();
-            // C-2/C-3/C-4: 每个流维护独立的 StreamState 跨 chunk 传递 id/model/tokens
             let mut stream_state = StreamState::new();
 
             byte_stream_with_sentinel.flat_map(move |result| {
@@ -257,12 +274,20 @@ impl ProviderClient {
 
                 match result {
                     Err(e) => {
+                        // 流出错，标记 done 让后台任务立即退出
+                        token_counter_inner.done.store(true, Ordering::Release);
                         futures::stream::iter(vec![Err(e)])
                     }
                     Ok(bytes) => {
-                        buf.push_str(&String::from_utf8_lossy(&bytes));
+                        // C-3: 使用 from_utf8_lossy 仍然保留（SSE 数据本身必须是 UTF-8）
+                        // 但记录警告当出现替换字符
+                        let text = String::from_utf8_lossy(&bytes);
+                        if text.contains('\u{FFFD}') {
+                            tracing::warn!("Non-UTF-8 bytes in SSE stream, data may be corrupted");
+                        }
+                        buf.push_str(&text);
 
-                        let mut output: Vec<Result<bytes::Bytes, crate::types::GatewayError>> =
+                        let mut output: Vec<Result<bytes::Bytes, GatewayError>> =
                             Vec::new();
 
                         // 按 \n\n 分割完整的 SSE 事件
@@ -285,18 +310,17 @@ impl ProviderClient {
                                 Some(s) => s,
                             };
 
-                            // [DONE] 终止信号
+                            // [DONE] 终止信号 — 标记流完毕
                             if json_str == "[DONE]" {
+                                token_counter_inner.done.store(true, Ordering::Release);
                                 output.push(Ok(bytes::Bytes::from("data: [DONE]\n\n")));
                                 continue;
                             }
 
-                            // 转换 JSON chunk（传入 stream_state 保持跨 chunk 状态）
                             match ResponseMapper::convert_stream_chunk(json_str, &provider, &mut stream_state) {
-                                // SKIP 表示这个事件不需要发给客户端
                                 Ok(None) => {}
                                 Ok(Some(converted)) => {
-                                    // 提取 token 使用量（message_delta 事件中的 usage）
+                                    // C-1: 提取 token 使用量，条件改为 prompt > 0 || completion > 0
                                     if let Ok(chunk_json) =
                                         serde_json::from_str::<serde_json::Value>(&converted)
                                     {
@@ -310,7 +334,8 @@ impl ProviderClient {
                                                     .get("completion_tokens")
                                                     .and_then(|t| t.as_u64())
                                                     .unwrap_or(0);
-                                                if completion > 0 {
+                                                // C-1 fix: 只要有任意 token 就记录
+                                                if prompt > 0 || completion > 0 {
                                                     token_counter_inner
                                                         .prompt
                                                         .store(prompt, Ordering::Relaxed);
@@ -355,19 +380,23 @@ impl ProviderClient {
 }
 
 impl Dispatcher {
-    pub fn new(config: &Config) -> Self {
+    /// M-1: new 返回 Result，让启动时快速失败
+    pub fn new(config: &Config) -> Result<Self, GatewayError> {
         let mut providers = HashMap::new();
 
         for (name, provider_config) in &config.providers {
-            let provider = Provider::from_str(name)
-                .unwrap_or_else(|_| Provider::Custom(name.clone()));
-            let client = ProviderClient::new(provider, provider_config.clone());
+            let provider = Provider::from_str(name)?;
+            let client = ProviderClient::new(provider, provider_config.clone())
+                .map_err(|e| {
+                    tracing::error!(provider = %name, error = %e, "Failed to create provider client");
+                    e
+                })?;
             providers.insert(name.clone(), client);
         }
 
-        Self {
+        Ok(Self {
             providers: Arc::new(providers),
-        }
+        })
     }
 
     pub fn get_provider(&self, name: &str) -> Option<&ProviderClient> {

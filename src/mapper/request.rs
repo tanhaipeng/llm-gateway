@@ -162,6 +162,41 @@ mod tests {
     }
 
     #[test]
+    fn test_consecutive_user_messages_merged() {
+        // C-6: consecutive user messages should be merged to avoid Anthropic 400
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "user", "content": "World"}
+            ]
+        }));
+        let msgs = result["messages"].as_array().unwrap();
+        // Should be merged into single user message
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_empty_assistant_message_skipped_without_breaking_alternation() {
+        // C-5: empty assistant message skip should not break user/assistant alternation
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": null},
+                {"role": "user", "content": "Still here"}
+            ]
+        }));
+        let msgs = result["messages"].as_array().unwrap();
+        // The two user messages should be merged (since empty assistant was skipped)
+        // or appear as user -> user -> merged; either way Anthropic won't get consecutive user msgs
+        // After skip: user("Hi") then user("Still here") => merged to 1
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+    }
+
+    #[test]
     fn test_tool_result_array_content() {
         // H-5: tool_result content supports array format
         let result = convert(serde_json::json!({
@@ -326,10 +361,42 @@ impl RequestMapper {
                 }
                 "user" => {
                     let content = Self::convert_openai_user_content(msg.get("content"));
-                    anthropic_messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": content
-                    }));
+                    // C-6: 如果上一条消息已经是 user，将内容合并，避免连续 user 消息触发 Anthropic 400
+                    let last_is_user = anthropic_messages
+                        .last()
+                        .map_or(false, |m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
+                    if last_is_user {
+                        if let Some(last) = anthropic_messages.last_mut() {
+                            // 将新的 user 内容追加到上一条消息
+                            match (&mut last["content"], &content) {
+                                (Value::Array(existing), Value::Array(new_parts)) => {
+                                    existing.extend(new_parts.clone());
+                                }
+                                (Value::Array(existing), Value::String(s)) => {
+                                    if !s.is_empty() {
+                                        existing.push(serde_json::json!({"type": "text", "text": s}));
+                                    }
+                                }
+                                (Value::String(existing), Value::String(s)) => {
+                                    if !s.is_empty() {
+                                        let merged = format!("{}\n{}", existing, s);
+                                        last["content"] = Value::String(merged);
+                                    }
+                                }
+                                (Value::String(existing_str), Value::Array(new_parts)) => {
+                                    let mut blocks = vec![serde_json::json!({"type": "text", "text": existing_str.clone()})];
+                                    blocks.extend(new_parts.clone());
+                                    last["content"] = Value::Array(blocks);
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": content
+                        }));
+                    }
                 }
                 "assistant" => {
                     let mut content_blocks: Vec<Value> = Vec::new();
@@ -374,14 +441,28 @@ impl RequestMapper {
 
                     // H-1: 不插入空文本块；如果 content_blocks 为空则跳过此消息
                     // Anthropic 不接受空 text 块，也不接受空 content 数组
+                    // C-5: 跳过空 assistant 消息时需要继续处理后续消息，不会破坏交替顺序
+                    // （连续 assistant 消息合并，避免触发 Anthropic 400）
                     if content_blocks.is_empty() {
                         continue;
                     }
 
-                    anthropic_messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": content_blocks
-                    }));
+                    // C-6: 如果上一条消息已经是 assistant，将内容块合并
+                    let last_is_assistant = anthropic_messages
+                        .last()
+                        .map_or(false, |m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"));
+                    if last_is_assistant {
+                        if let Some(last) = anthropic_messages.last_mut() {
+                            if let Some(arr) = last["content"].as_array_mut() {
+                                arr.extend(content_blocks);
+                            }
+                        }
+                    } else {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": content_blocks
+                        }));
+                    }
                 }
                 "tool" => {
                     // OpenAI tool 结果消息 → Anthropic tool_result

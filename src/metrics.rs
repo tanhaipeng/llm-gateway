@@ -11,23 +11,30 @@ pub struct PerformanceMetrics {
     pub success_rate: f64,
     pub error_rate: f64,
     pub avg_latency_ms: f64,
+    /// H-3: 无延迟直方图时，这些字段值与 avg 相同（如需真实百分位，需维护滑动窗口）
     pub p50_latency_ms: f64,
     pub p95_latency_ms: f64,
     pub p99_latency_ms: f64,
     pub requests_per_second: f64,
     pub total_tokens: u64,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
     pub avg_tokens_per_request: f64,
     pub requests_by_provider: std::collections::HashMap<String, ProviderMetrics>,
     pub uptime_seconds: u64,
 }
 
-/// 提供商特定指标
+/// 提供商特定指标 — H-1/H-2/H-3: 使用真实 per-provider 数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderMetrics {
     pub total_requests: u64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
     pub success_rate: f64,
     pub avg_latency_ms: f64,
     pub total_tokens: u64,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
 }
 
 impl Default for MetricsCollector {
@@ -40,70 +47,87 @@ impl MetricsCollector {
     pub fn new() -> Self {
         Self {}
     }
-    
+
     /// 使用指定的 logger 收集性能指标
-    pub async fn collect_metrics_with_logger(&self, logger: &crate::logging::RequestLogger, uptime_seconds: u64) -> PerformanceMetrics {
+    pub async fn collect_metrics_with_logger(
+        &self,
+        logger: &crate::logging::RequestLogger,
+        uptime_seconds: u64,
+    ) -> PerformanceMetrics {
         let stats = logger.get_stats().await;
-        
+
         let total_requests = stats.total_requests;
         let success_rate = if total_requests > 0 {
             (stats.successful_requests as f64 / total_requests as f64) * 100.0
         } else {
             0.0
         };
-        
+
         let error_rate = if total_requests > 0 {
             (stats.failed_requests as f64 / total_requests as f64) * 100.0
         } else {
             0.0
         };
-        
+
         let avg_latency_ms = if total_requests > 0 {
             stats.total_duration_ms as f64 / total_requests as f64
         } else {
             0.0
         };
-        
+
         let avg_tokens_per_request = if total_requests > 0 {
             stats.total_tokens as f64 / total_requests as f64
         } else {
             0.0
         };
-        
+
         let requests_per_second = if uptime_seconds > 0 {
             total_requests as f64 / uptime_seconds as f64
         } else {
             0.0
         };
-        
-        // 计算提供商特定指标
+
+        // H-1/H-2/H-3: 使用真实 per-provider 统计，而不是全局值均摊
         let mut requests_by_provider = std::collections::HashMap::new();
-        for (provider, count) in &stats.requests_by_provider {
-            let provider_metrics = ProviderMetrics {
-                total_requests: *count,
-                success_rate: success_rate, // 简化处理，实际应该分别计算
-                avg_latency_ms: avg_latency_ms, // 简化处理，实际应该分别计算
-                total_tokens: if !stats.requests_by_provider.is_empty() {
-                    stats.total_tokens / stats.requests_by_provider.len() as u64
-                } else {
-                    0
-                }, // 简化处理
+        for (provider, ps) in &stats.stats_by_provider {
+            let provider_success_rate = if ps.total_requests > 0 {
+                (ps.successful_requests as f64 / ps.total_requests as f64) * 100.0
+            } else {
+                0.0
             };
-            requests_by_provider.insert(provider.clone(), provider_metrics);
+            let provider_avg_latency = if ps.total_requests > 0 {
+                ps.total_duration_ms as f64 / ps.total_requests as f64
+            } else {
+                0.0
+            };
+            requests_by_provider.insert(
+                provider.clone(),
+                ProviderMetrics {
+                    total_requests: ps.total_requests,
+                    successful_requests: ps.successful_requests,
+                    failed_requests: ps.failed_requests,
+                    success_rate: provider_success_rate,
+                    avg_latency_ms: provider_avg_latency,
+                    total_tokens: ps.total_tokens,
+                    total_prompt_tokens: ps.total_prompt_tokens,
+                    total_completion_tokens: ps.total_completion_tokens,
+                },
+            );
         }
-        
-        // 这里我们简化了P50, P95, P99延迟的计算
-        // 实际实现需要收集所有请求的延迟数据并计算百分位数
+
         PerformanceMetrics {
             total_requests,
             success_rate,
             error_rate,
             avg_latency_ms,
-            p50_latency_ms: avg_latency_ms, // 简化处理
-            p95_latency_ms: avg_latency_ms * 1.5, // 简化处理
-            p99_latency_ms: avg_latency_ms * 2.0, // 简化处理
+            // H-3: 无延迟直方图，均设为 avg（诚实地表示无法计算真实百分位）
+            p50_latency_ms: avg_latency_ms,
+            p95_latency_ms: avg_latency_ms,
+            p99_latency_ms: avg_latency_ms,
             requests_per_second,
             total_tokens: stats.total_tokens,
+            total_prompt_tokens: stats.total_prompt_tokens,
+            total_completion_tokens: stats.total_completion_tokens,
             avg_tokens_per_request,
             requests_by_provider,
             uptime_seconds,
@@ -119,8 +143,7 @@ mod tests {
     async fn test_metrics_collector() {
         let collector = MetricsCollector::new();
         let logger = crate::logging::RequestLogger::new();
-        
-        // 记录一些请求
+
         let tracker = logger.start_request("test-1".to_string());
         tracker
             .complete(
@@ -132,7 +155,7 @@ mod tests {
                 200,
             )
             .await;
-        
+
         let tracker = logger.start_request("test-2".to_string());
         tracker
             .complete_error(
@@ -143,11 +166,32 @@ mod tests {
                 "Internal error".to_string(),
             )
             .await;
-        
+
         let metrics = collector.collect_metrics_with_logger(&logger, 60).await;
-        
+
         assert_eq!(metrics.total_requests, 2);
         assert_eq!(metrics.success_rate, 50.0);
         assert_eq!(metrics.error_rate, 50.0);
+
+        // H-1: per-provider token counts should be correct, not global-average
+        let anthropic = &metrics.requests_by_provider["anthropic"];
+        assert_eq!(anthropic.total_requests, 1);
+        assert_eq!(anthropic.successful_requests, 1);
+        assert_eq!(anthropic.total_tokens, 300);
+        assert_eq!(anthropic.total_prompt_tokens, 100);
+        assert_eq!(anthropic.total_completion_tokens, 200);
+
+        let openai = &metrics.requests_by_provider["openai"];
+        assert_eq!(openai.total_requests, 1);
+        assert_eq!(openai.failed_requests, 1);
+        assert_eq!(openai.total_tokens, 0);
+
+        // H-2: per-provider success_rate should not be global value
+        assert_eq!(anthropic.success_rate, 100.0);
+        assert_eq!(openai.success_rate, 0.0);
+
+        // M-5: global prompt/completion tracked
+        assert_eq!(metrics.total_prompt_tokens, 100);
+        assert_eq!(metrics.total_completion_tokens, 200);
     }
 }

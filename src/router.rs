@@ -149,9 +149,10 @@ pub async fn proxy_handler(
                         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
                         loop {
                             tokio::time::sleep(poll).await;
-                            let p = counter.prompt.load(Ordering::Relaxed);
-                            let c = counter.completion.load(Ordering::Relaxed);
-                            if p > 0 || c > 0 || std::time::Instant::now() >= deadline {
+                            // C-2: exit as soon as stream signals done or deadline exceeded
+                            if counter.done.load(Ordering::Acquire) || std::time::Instant::now() >= deadline {
+                                let p = counter.prompt.load(Ordering::Relaxed);
+                                let c = counter.completion.load(Ordering::Relaxed);
                                 logger_bg.add_tokens(p, c).await;
                                 break;
                             }

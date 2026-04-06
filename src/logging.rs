@@ -1,5 +1,4 @@
 use std::time::Instant;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -10,6 +9,18 @@ pub struct RequestLogger {
     stats: Arc<RwLock<RequestStats>>,
 }
 
+/// 提供商级别的统计信息
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProviderStats {
+    pub total_requests: u64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
+    pub total_tokens: u64,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
+    pub total_duration_ms: u64,
+}
+
 /// 请求统计信息
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RequestStats {
@@ -17,26 +28,14 @@ pub struct RequestStats {
     pub successful_requests: u64,
     pub failed_requests: u64,
     pub total_tokens: u64,
+    /// M-5: 分别追踪 prompt 和 completion token
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
     pub total_duration_ms: u64,
     pub requests_by_provider: std::collections::HashMap<String, u64>,
     pub requests_by_status: std::collections::HashMap<String, u64>,
-}
-
-/// 单个请求日志
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequestLog {
-    pub request_id: String,
-    #[serde(with = "chrono::serde::ts_seconds")]
-    pub timestamp: DateTime<Utc>,
-    pub provider: String,
-    pub model: String,
-    pub is_stream: bool,
-    pub status_code: u16,
-    pub duration_ms: u64,
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-    pub error_message: Option<String>,
+    /// H-1/H-2/H-3: 真实的 per-provider 统计数据
+    pub stats_by_provider: std::collections::HashMap<String, ProviderStats>,
 }
 
 impl Default for RequestLogger {
@@ -74,22 +73,43 @@ impl RequestLogger {
         completion_tokens: u64,
     ) {
         let total_tokens = prompt_tokens + completion_tokens;
-        
-        let log = RequestLog {
-            request_id,
-            timestamp: Utc::now(),
-            provider,
-            model,
-            is_stream,
-            status_code,
-            duration_ms,
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            error_message: None,
-        };
 
-        self.log_request(log).await;
+        // M-4: 先在独立作用域内持有写锁并更新统计，写锁释放后再调用 tracing::info!
+        {
+            let mut stats = self.stats.write().await;
+
+            stats.total_requests += 1;
+            stats.successful_requests += 1;
+            stats.total_tokens += total_tokens;
+            // M-5: 分别记录 prompt / completion
+            stats.total_prompt_tokens += prompt_tokens;
+            stats.total_completion_tokens += completion_tokens;
+            stats.total_duration_ms += duration_ms;
+
+            *stats.requests_by_provider.entry(provider.clone()).or_insert(0) += 1;
+            *stats.requests_by_status.entry(status_code.to_string()).or_insert(0) += 1;
+
+            // H-1/H-2/H-3: 更新 per-provider 详细统计
+            let ps = stats.stats_by_provider.entry(provider.clone()).or_default();
+            ps.total_requests += 1;
+            ps.successful_requests += 1;
+            ps.total_tokens += total_tokens;
+            ps.total_prompt_tokens += prompt_tokens;
+            ps.total_completion_tokens += completion_tokens;
+            ps.total_duration_ms += duration_ms;
+        } // 写锁在此释放
+
+        tracing::info!(
+            request_id = %request_id,
+            provider = %provider,
+            model = %model,
+            status = status_code,
+            duration_ms = duration_ms,
+            prompt_tokens = prompt_tokens,
+            completion_tokens = completion_tokens,
+            is_stream = is_stream,
+            "Request completed"
+        );
     }
 
     /// 记录请求失败
@@ -103,69 +123,32 @@ impl RequestLogger {
         duration_ms: u64,
         error_message: String,
     ) {
-        let log = RequestLog {
-            request_id,
-            timestamp: Utc::now(),
-            provider,
-            model,
-            is_stream,
-            status_code,
-            duration_ms,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            error_message: Some(error_message),
-        };
-
-        self.log_request(log).await;
-    }
-
-    /// 内部记录请求
-    async fn log_request(&self, log: RequestLog) {
-        // M-4: 先在独立作用域内持有写锁并更新统计，写锁释放后再调用 tracing::info!
-        // 避免持锁时调用可能阻塞的日志 I/O
-        let (request_id, provider_name, model, status_code, duration_ms, total_tokens, error) = {
+        {
             let mut stats = self.stats.write().await;
 
             stats.total_requests += 1;
+            stats.failed_requests += 1;
+            stats.total_duration_ms += duration_ms;
 
-            if log.error_message.is_none() {
-                stats.successful_requests += 1;
-                stats.total_tokens += log.total_tokens;
-            } else {
-                stats.failed_requests += 1;
-            }
+            *stats.requests_by_provider.entry(provider.clone()).or_insert(0) += 1;
+            *stats.requests_by_status.entry(status_code.to_string()).or_insert(0) += 1;
 
-            stats.total_duration_ms += log.duration_ms;
+            // H-1/H-2/H-3: 更新 per-provider 失败统计
+            let ps = stats.stats_by_provider.entry(provider.clone()).or_default();
+            ps.total_requests += 1;
+            ps.failed_requests += 1;
+            ps.total_duration_ms += duration_ms;
+        } // 写锁在此释放
 
-            // 按提供商统计
-            *stats.requests_by_provider.entry(log.provider.clone()).or_insert(0) += 1;
-
-            // 按状态码统计
-            *stats.requests_by_status.entry(log.status_code.to_string()).or_insert(0) += 1;
-
-            // 写锁作用域结束前收集需要打印的信息
-            (
-                log.request_id.clone(),
-                log.provider.clone(),
-                log.model.clone(),
-                log.status_code,
-                log.duration_ms,
-                log.total_tokens,
-                log.error_message.clone(),
-            )
-        }; // 写锁在此释放
-
-        // 写锁已释放，再输出日志
-        tracing::info!(
+        tracing::warn!(
             request_id = %request_id,
-            provider = %provider_name,
+            provider = %provider,
             model = %model,
             status = status_code,
             duration_ms = duration_ms,
-            tokens = total_tokens,
-            error = error.as_deref().unwrap_or("none"),
-            "Request completed"
+            is_stream = is_stream,
+            error = %error_message,
+            "Request failed"
         );
     }
 
@@ -175,11 +158,14 @@ impl RequestLogger {
     }
 
     /// 补充 token 统计（用于流式请求在流结束后异步更新）
+    /// M-5: 分别追踪 prompt / completion
     pub async fn add_tokens(&self, prompt_tokens: u64, completion_tokens: u64) {
         let total = prompt_tokens + completion_tokens;
         if total > 0 {
             let mut stats = self.stats.write().await;
             stats.total_tokens += total;
+            stats.total_prompt_tokens += prompt_tokens;
+            stats.total_completion_tokens += completion_tokens;
             tracing::debug!(
                 prompt_tokens = prompt_tokens,
                 completion_tokens = completion_tokens,
@@ -253,8 +239,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_logger() {
         let logger = RequestLogger::new();
-        
-        // 记录成功请求
+
         let tracker = logger.start_request("test-1".to_string());
         tracker
             .complete(
@@ -272,13 +257,21 @@ mod tests {
         assert_eq!(stats.successful_requests, 1);
         assert_eq!(stats.failed_requests, 0);
         assert_eq!(stats.total_tokens, 300);
+        // M-5: prompt/completion tracked separately
+        assert_eq!(stats.total_prompt_tokens, 100);
+        assert_eq!(stats.total_completion_tokens, 200);
+        // per-provider stats
+        let ps = &stats.stats_by_provider["anthropic"];
+        assert_eq!(ps.total_requests, 1);
+        assert_eq!(ps.total_tokens, 300);
+        assert_eq!(ps.total_prompt_tokens, 100);
+        assert_eq!(ps.total_completion_tokens, 200);
     }
 
     #[tokio::test]
     async fn test_request_error() {
         let logger = RequestLogger::new();
-        
-        // 记录失败请求
+
         let tracker = logger.start_request("test-2".to_string());
         tracker
             .complete_error(
@@ -294,5 +287,17 @@ mod tests {
         assert_eq!(stats.total_requests, 1);
         assert_eq!(stats.successful_requests, 0);
         assert_eq!(stats.failed_requests, 1);
+        let ps = &stats.stats_by_provider["openai"];
+        assert_eq!(ps.failed_requests, 1);
+    }
+
+    #[tokio::test]
+    async fn test_add_tokens_tracks_both() {
+        let logger = RequestLogger::new();
+        logger.add_tokens(50, 150).await;
+        let stats = logger.get_stats().await;
+        assert_eq!(stats.total_prompt_tokens, 50);
+        assert_eq!(stats.total_completion_tokens, 150);
+        assert_eq!(stats.total_tokens, 200);
     }
 }
