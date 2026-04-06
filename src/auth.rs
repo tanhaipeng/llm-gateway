@@ -5,6 +5,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use subtle::ConstantTimeEq;
 
 #[derive(Debug, Clone)]
 pub struct AuthState {
@@ -42,7 +43,11 @@ pub async fn auth_middleware(
     // 验证 API key（支持 Bearer token 格式）
     let provided_key = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
 
-    if provided_key != auth.api_key {
+    let provided = provided_key.as_bytes();
+    let expected = auth.api_key.as_bytes();
+    let is_valid = provided.len() == expected.len() && provided.ct_eq(expected).into();
+
+    if !is_valid {
         return Err(AuthError::InvalidApiKey);
     }
 

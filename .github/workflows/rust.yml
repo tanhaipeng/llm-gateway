@@ -3,8 +3,10 @@ name: Rust
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,3 +26,55 @@ jobs:
       run: cargo clippy --all-targets --all-features -- -D warnings
     - name: Run tests
       run: cargo test --all-targets --all-features --verbose
+
+  build-artifacts:
+    name: Build Artifacts (${{ matrix.os }})
+    needs: quality
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_suffix: linux-x86_64
+          - os: macos-latest
+            artifact_suffix: macos-arm64
+          - os: windows-latest
+            artifact_suffix: windows-x86_64
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build release binary
+      run: cargo build --release --locked --verbose
+
+    - name: Package artifact (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        mkdir -p dist
+        cp target/release/llm-gateway dist/llm-gateway
+        tar -czf llm-gateway-${{ matrix.artifact_suffix }}.tar.gz -C dist llm-gateway
+
+    - name: Package artifact (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path dist -Force | Out-Null
+        Copy-Item target/release/llm-gateway.exe dist/llm-gateway.exe
+        Compress-Archive -Path dist/llm-gateway.exe -DestinationPath llm-gateway-${{ matrix.artifact_suffix }}.zip -Force
+
+    - name: Upload artifact (Unix)
+      if: runner.os != 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: llm-gateway-${{ matrix.artifact_suffix }}
+        path: llm-gateway-${{ matrix.artifact_suffix }}.tar.gz
+        if-no-files-found: error
+
+    - name: Upload artifact (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: llm-gateway-${{ matrix.artifact_suffix }}
+        path: llm-gateway-${{ matrix.artifact_suffix }}.zip
+        if-no-files-found: error

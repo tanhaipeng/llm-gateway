@@ -89,11 +89,16 @@ pub struct ProviderClient {
 
 impl ProviderClient {
     /// M-1: 返回 Result 而不是 expect panic
-    pub fn new(provider: Provider, config: ProviderConfig) -> Result<Self, GatewayError> {
+    pub fn new(
+        provider: Provider,
+        config: ProviderConfig,
+        request_timeout_seconds: u64,
+    ) -> Result<Self, GatewayError> {
+        let timeout = std::time::Duration::from_secs(request_timeout_seconds.max(1));
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(10)
             .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .timeout(std::time::Duration::from_secs(900))
+            .timeout(timeout)
             .connect_timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(5))
             .tcp_nodelay(true)
@@ -163,7 +168,7 @@ impl ProviderClient {
     ) -> axum::response::Response {
         // H-6: 日志中截断错误体，避免泄露敏感内容
         let truncated = if error_body.len() > 512 {
-            format!("{}…[truncated]", &error_body[..512])
+            format!("{}…[truncated]", truncate_on_char_boundary(error_body, 512))
         } else {
             error_body.to_string()
         };
@@ -492,7 +497,12 @@ impl Dispatcher {
 
         for (name, provider_config) in &config.providers {
             let provider = Provider::from_str(name)?;
-            let client = ProviderClient::new(provider, provider_config.clone()).map_err(|e| {
+            let client = ProviderClient::new(
+                provider,
+                provider_config.clone(),
+                config.server.request_timeout_seconds,
+            )
+            .map_err(|e| {
                 tracing::error!(provider = %name, error = %e, "Failed to create provider client");
                 e
             })?;
@@ -507,6 +517,17 @@ impl Dispatcher {
     pub fn get_provider(&self, name: &str) -> Option<&ProviderClient> {
         self.providers.get(name)
     }
+}
+
+fn truncate_on_char_boundary(input: &str, max_len: usize) -> &str {
+    if input.len() <= max_len {
+        return input;
+    }
+    let mut idx = max_len;
+    while idx > 0 && !input.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    &input[..idx]
 }
 
 #[cfg(test)]
@@ -560,5 +581,13 @@ mod tests {
         append_sse_text_with_limit(&mut buf, "data: 1\r\ndata: 2\r\r\n")
             .expect("append_sse_text_with_limit should normalize CRLF");
         assert_eq!(buf, "data: 1\ndata: 2\n\n");
+    }
+
+    #[test]
+    fn test_truncate_on_char_boundary_with_multibyte_utf8() {
+        let text = "abcd中文ef";
+        let out = truncate_on_char_boundary(text, 6);
+        assert_eq!(out, "abcd");
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 }

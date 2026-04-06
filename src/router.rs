@@ -225,10 +225,11 @@ pub async fn proxy_handler(
                         let tracker_bg = tracker;
                         let provider_bg = provider.clone();
                         let model_bg = model.clone();
+                        let stream_wait_timeout_seconds = state.request_timeout_seconds;
                         tokio::spawn(async move {
                             if !counter.done.load(Ordering::Acquire) {
                                 let wait_result = tokio::time::timeout(
-                                    std::time::Duration::from_secs(900),
+                                    std::time::Duration::from_secs(stream_wait_timeout_seconds),
                                     counter.notify.notified(),
                                 )
                                 .await;
