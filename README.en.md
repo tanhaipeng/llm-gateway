@@ -64,6 +64,10 @@ server:
     max-requests-per-second: 200
   metrics:
     require-auth: true  # recommended in production to protect /metrics
+  resilience:
+    provider-max-concurrency: 128
+    retry-max-attempts: 3
+    circuit-breaker-failure-threshold: 8
 
 providers:
   openai:
@@ -93,6 +97,14 @@ providers:
 | `limits.max-in-flight-requests` | `usize?` | Global in-flight concurrency limit |
 | `limits.max-requests-per-second` | `u64?` | Global requests-per-second limit |
 | `metrics.require-auth` | `bool` | Whether `/metrics` requires gateway authentication |
+| `resilience.provider-max-concurrency` | `usize` | Per-provider bulkhead concurrency limit |
+| `resilience.retry-max-attempts` | `u32` | Max retries for transient transport errors |
+| `resilience.circuit-breaker-failure-threshold` | `u32` | Consecutive failure threshold for circuit breaker |
+
+Fixed internal defaults (not configurable):
+- Initial retry backoff: `100ms`
+- Max retry backoff: `1000ms`
+- Circuit breaker open duration: `20s`
 
 - `server.metrics.require-auth` only takes effect when `GATEWAY_API_KEY` is set
 - `/health` is always unauthenticated

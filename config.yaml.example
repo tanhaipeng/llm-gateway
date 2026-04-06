@@ -12,6 +12,10 @@ server:
     max-requests-per-second: 200
   metrics:
     require-auth: true
+  resilience:
+    provider-max-concurrency: 128
+    retry-max-attempts: 3
+    circuit-breaker-failure-threshold: 8
 
 # Providers 配置
 providers:

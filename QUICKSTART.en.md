@@ -52,6 +52,10 @@ server:
     max-requests-per-second: 200
   metrics:
     require-auth: true  # recommended in production to protect /metrics
+  resilience:
+    provider-max-concurrency: 128
+    retry-max-attempts: 3
+    circuit-breaker-failure-threshold: 8
 ```
 
 `/health` is always public; `/metrics` auth depends on `require-auth`.

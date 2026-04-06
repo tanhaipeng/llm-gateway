@@ -1,15 +1,99 @@
 use crate::mapper::response::StreamState;
 use crate::mapper::{RequestMapper, ResponseMapper};
-use crate::types::{Config, GatewayError, Provider, ProviderConfig, SSEStream};
+use crate::types::{Config, GatewayError, Provider, ProviderConfig, ResilienceConfig, SSEStream};
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 const MAX_SSE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone)]
+struct RetryPolicy {
+    max_attempts: u32,
+    initial_backoff_ms: u64,
+    max_backoff_ms: u64,
+}
+
+impl RetryPolicy {
+    fn from_config(config: &ResilienceConfig) -> Self {
+        Self {
+            max_attempts: config.retry_max_attempts.max(1),
+            initial_backoff_ms: 100,
+            max_backoff_ms: 1_000,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CircuitBreaker {
+    failure_threshold: u32,
+    open_duration: std::time::Duration,
+    state: Mutex<CircuitBreakerState>,
+}
+
+#[derive(Debug, Default)]
+struct CircuitBreakerState {
+    consecutive_failures: u32,
+    open_until: Option<std::time::Instant>,
+}
+
+impl CircuitBreaker {
+    fn new(config: &ResilienceConfig) -> Self {
+        Self {
+            failure_threshold: config.circuit_breaker_failure_threshold.max(1),
+            open_duration: std::time::Duration::from_secs(20),
+            state: Mutex::new(CircuitBreakerState::default()),
+        }
+    }
+
+    fn allow(&self) -> Result<(), GatewayError> {
+        let now = std::time::Instant::now();
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if let Some(until) = state.open_until {
+            if now < until {
+                let remaining = until.saturating_duration_since(now).as_secs();
+                return Err(GatewayError::ServiceUnavailable(format!(
+                    "Provider circuit breaker is open, retry in {}s",
+                    remaining.max(1)
+                )));
+            }
+            // Open period finished, allow traffic again.
+            state.open_until = None;
+            state.consecutive_failures = 0;
+        }
+        Ok(())
+    }
+
+    fn on_success(&self) {
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.consecutive_failures = 0;
+        state.open_until = None;
+    }
+
+    fn on_failure(&self) {
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        if state.consecutive_failures >= self.failure_threshold {
+            state.open_until = Some(std::time::Instant::now() + self.open_duration);
+            state.consecutive_failures = 0;
+        }
+    }
+}
 
 /// 流式 token 计数器（AtomicU64 避免锁竞争）
 /// `done` 标志在流完全处理完毕后置 true，让后台任务立即退出而不是等 900s
@@ -85,6 +169,9 @@ pub struct ProviderClient {
     client: reqwest::Client,
     config: Arc<ProviderConfig>,
     provider: Provider,
+    max_concurrency: Arc<Semaphore>,
+    retry_policy: RetryPolicy,
+    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl ProviderClient {
@@ -93,6 +180,7 @@ impl ProviderClient {
         provider: Provider,
         config: ProviderConfig,
         request_timeout_seconds: u64,
+        resilience: &ResilienceConfig,
     ) -> Result<Self, GatewayError> {
         let timeout = std::time::Duration::from_secs(request_timeout_seconds.max(1));
         let client = reqwest::Client::builder()
@@ -110,6 +198,9 @@ impl ProviderClient {
             client,
             config: Arc::new(config),
             provider,
+            max_concurrency: Arc::new(Semaphore::new(resilience.provider_max_concurrency.max(1))),
+            retry_policy: RetryPolicy::from_config(resilience),
+            circuit_breaker: Arc::new(CircuitBreaker::new(resilience)),
         })
     }
 
@@ -158,6 +249,81 @@ impl ProviderClient {
             }
         }
         request_builder
+    }
+
+    fn is_retryable_error(error: &reqwest::Error) -> bool {
+        // 保守策略：仅在连接失败/超时时重试，避免非幂等请求重复执行风险
+        error.is_timeout() || error.is_connect()
+    }
+
+    fn is_provider_unhealthy_status(status: reqwest::StatusCode) -> bool {
+        status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+    }
+
+    fn backoff_with_jitter_ms(&self, attempt: u32) -> u64 {
+        let exp = 1_u64 << attempt.saturating_sub(1).min(10);
+        let base = self
+            .retry_policy
+            .initial_backoff_ms
+            .saturating_mul(exp)
+            .min(self.retry_policy.max_backoff_ms);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0);
+        let jitter = nanos % 50;
+        base.saturating_add(jitter)
+    }
+
+    fn acquire_bulkhead(&self) -> Result<OwnedSemaphorePermit, GatewayError> {
+        self.max_concurrency
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                GatewayError::ServiceUnavailable("Provider concurrency limit reached".to_string())
+            })
+    }
+
+    async fn send_with_retry<F>(&self, build_request: F) -> Result<reqwest::Response, GatewayError>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        let _permit = self.acquire_bulkhead()?;
+        self.circuit_breaker.allow()?;
+
+        let max_attempts = self.retry_policy.max_attempts.max(1);
+        let mut attempt = 1_u32;
+        loop {
+            let send_result = build_request().send().await;
+            match send_result {
+                Ok(response) => {
+                    let status = response.status();
+                    if Self::is_provider_unhealthy_status(status) {
+                        self.circuit_breaker.on_failure();
+                    } else if status.is_success() {
+                        self.circuit_breaker.on_success();
+                    }
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if Self::is_retryable_error(&error) && attempt < max_attempts {
+                        let backoff_ms = self.backoff_with_jitter_ms(attempt);
+                        tracing::warn!(
+                            provider = %self.provider,
+                            attempt = attempt,
+                            backoff_ms = backoff_ms,
+                            error = %error,
+                            "Retrying provider request due to transient transport error"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        attempt = attempt.saturating_add(1);
+                        continue;
+                    }
+                    self.circuit_breaker.on_failure();
+                    return Err(GatewayError::HttpError(error));
+                }
+            }
+        }
     }
 
     /// 构建统一的错误响应（透传真实 HTTP 状态码）
@@ -222,13 +388,14 @@ impl ProviderClient {
         )?;
         let url = self.build_url();
 
-        let request_builder = self
-            .add_provider_headers(self.client.post(&url))
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .body(converted_body);
-
-        let response = request_builder.send().await?;
+        let response = self
+            .send_with_retry(|| {
+                self.add_provider_headers(self.client.post(&url))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .body(converted_body.clone())
+            })
+            .await?;
         let status = response.status();
         let headers = response.headers().clone();
 
@@ -299,13 +466,14 @@ impl ProviderClient {
         let url = self.build_url();
         let provider_clone = self.provider.clone();
 
-        let request_builder = self
-            .add_provider_headers(self.client.post(&url))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .body(converted_body);
-
-        let response = request_builder.send().await?;
+        let response = self
+            .send_with_retry(|| {
+                self.add_provider_headers(self.client.post(&url))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream")
+                    .body(converted_body.clone())
+            })
+            .await?;
         let status = response.status();
 
         if !status.is_success() {
@@ -501,6 +669,7 @@ impl Dispatcher {
                 provider,
                 provider_config.clone(),
                 config.server.request_timeout_seconds,
+                &config.server.resilience,
             )
             .map_err(|e| {
                 tracing::error!(provider = %name, error = %e, "Failed to create provider client");
@@ -589,5 +758,32 @@ mod tests {
         let out = truncate_on_char_boundary(text, 6);
         assert_eq!(out, "abcd");
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_circuit_breaker_opens_after_threshold() {
+        let cfg = ResilienceConfig {
+            circuit_breaker_failure_threshold: 2,
+            ..ResilienceConfig::default()
+        };
+        let cb = CircuitBreaker::new(&cfg);
+        assert!(cb.allow().is_ok());
+        cb.on_failure();
+        assert!(cb.allow().is_ok());
+        cb.on_failure();
+        assert!(cb.allow().is_err());
+    }
+
+    #[test]
+    fn test_provider_unhealthy_status_set() {
+        assert!(ProviderClient::is_provider_unhealthy_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(ProviderClient::is_provider_unhealthy_status(
+            reqwest::StatusCode::BAD_GATEWAY
+        ));
+        assert!(!ProviderClient::is_provider_unhealthy_status(
+            reqwest::StatusCode::BAD_REQUEST
+        ));
     }
 }

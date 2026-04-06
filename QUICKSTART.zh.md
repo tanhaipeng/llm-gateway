@@ -52,6 +52,10 @@ server:
     max-requests-per-second: 200
   metrics:
     require-auth: true  # 建议生产开启，保护 /metrics
+  resilience:
+    provider-max-concurrency: 128
+    retry-max-attempts: 3
+    circuit-breaker-failure-threshold: 8
 ```
 
 `/health` 永远免认证，`/metrics` 由 `require-auth` 控制。

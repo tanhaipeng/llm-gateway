@@ -10,6 +10,10 @@ pub enum GatewayError {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
+    // 服务不可用（并发保护/熔断等）
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     // HTTP 网络错误（reqwest）
     #[error("HTTP request error: {0}")]
     HttpError(#[from] reqwest::Error),

@@ -368,6 +368,19 @@ mod tests {
     }
 
     #[test]
+    fn test_chat_completions_to_responses_uses_max_completion_tokens_fallback() {
+        let result = convert_to_provider_protocol(
+            serde_json::json!({
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_completion_tokens": 64
+            }),
+            Provider::OpenAI,
+        );
+        assert_eq!(result["max_output_tokens"], 64);
+    }
+
+    #[test]
     fn test_chat_completions_to_responses_keeps_model_for_any_provider() {
         let result = convert_to_provider_protocol(
             serde_json::json!({
@@ -562,6 +575,8 @@ impl RequestMapper {
         }
 
         if let Some(v) = chat_json.get("max_tokens") {
+            out["max_output_tokens"] = v.clone();
+        } else if let Some(v) = chat_json.get("max_completion_tokens") {
             out["max_output_tokens"] = v.clone();
         }
         if let Some(v) = chat_json.get("temperature") {

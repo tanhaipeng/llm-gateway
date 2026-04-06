@@ -64,6 +64,10 @@ server:
     max-requests-per-second: 200
   metrics:
     require-auth: true  # 建议生产开启，保护 /metrics
+  resilience:
+    provider-max-concurrency: 128
+    retry-max-attempts: 3
+    circuit-breaker-failure-threshold: 8
 
 providers:
   openai:
@@ -93,6 +97,14 @@ providers:
 | `limits.max-in-flight-requests` | `usize?` | 全局并发请求上限 |
 | `limits.max-requests-per-second` | `u64?` | 全局每秒请求上限（RPS） |
 | `metrics.require-auth` | `bool` | 是否要求 `/metrics` 通过网关鉴权 |
+| `resilience.provider-max-concurrency` | `usize` | 单 provider 并发隔离上限（bulkhead） |
+| `resilience.retry-max-attempts` | `u32` | 传输层瞬时错误最大重试次数 |
+| `resilience.circuit-breaker-failure-threshold` | `u32` | 熔断连续失败阈值 |
+
+固定默认（不可配置）：
+- 重试初始退避：`100ms`
+- 重试最大退避：`1000ms`
+- 熔断打开时间：`20s`
 
 - `server.metrics.require-auth` 仅在设置 `GATEWAY_API_KEY` 后生效
 - `/health` 永远免认证

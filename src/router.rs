@@ -147,6 +147,13 @@ pub async fn proxy_handler(
                     .await;
                 error_json_response(StatusCode::BAD_REQUEST, &msg)
             }
+            crate::types::GatewayError::ServiceUnavailable(msg) => {
+                tracing::warn!(request_id = %request_id, error = %msg, "Service unavailable");
+                tracker
+                    .complete_error(provider.clone(), model.clone(), is_stream, 503, msg.clone())
+                    .await;
+                error_json_response(StatusCode::SERVICE_UNAVAILABLE, &msg)
+            }
             other => {
                 let msg = format!("Provider error: {}", other);
                 tracing::error!(request_id = %request_id, error = %msg);

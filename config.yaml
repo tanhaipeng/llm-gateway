@@ -13,6 +13,10 @@ server:
     max-requests-per-second: 200
   metrics:
     require-auth: false
+  resilience:
+    provider-max-concurrency: 128
+    retry-max-attempts: 3
+    circuit-breaker-failure-threshold: 8
 
 # Providers 配置
 # 注意：API keys 应该从环境变量加载，不要在此文件中直接配置

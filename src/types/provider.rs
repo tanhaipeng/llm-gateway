@@ -68,6 +68,8 @@ pub struct ServerConfig {
     pub limits: LimitsConfig,
     #[serde(default)]
     pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub resilience: ResilienceConfig,
 }
 
 impl Default for ServerConfig {
@@ -79,6 +81,7 @@ impl Default for ServerConfig {
             cors: CorsConfig::default(),
             limits: LimitsConfig::default(),
             metrics: MetricsConfig::default(),
+            resilience: ResilienceConfig::default(),
         }
     }
 }
@@ -117,6 +120,39 @@ pub struct MetricsConfig {
     pub require_auth: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ResilienceConfig {
+    #[serde(default = "default_provider_max_concurrency")]
+    pub provider_max_concurrency: usize,
+    #[serde(default = "default_retry_max_attempts")]
+    pub retry_max_attempts: u32,
+    #[serde(default = "default_circuit_breaker_failure_threshold")]
+    pub circuit_breaker_failure_threshold: u32,
+}
+
+impl Default for ResilienceConfig {
+    fn default() -> Self {
+        Self {
+            provider_max_concurrency: default_provider_max_concurrency(),
+            retry_max_attempts: default_retry_max_attempts(),
+            circuit_breaker_failure_threshold: default_circuit_breaker_failure_threshold(),
+        }
+    }
+}
+
 fn default_cors_allow_origins() -> Vec<String> {
     Vec::new()
+}
+
+fn default_provider_max_concurrency() -> usize {
+    128
+}
+
+fn default_retry_max_attempts() -> u32 {
+    3
+}
+
+fn default_circuit_breaker_failure_threshold() -> u32 {
+    8
 }
