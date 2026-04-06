@@ -1,6 +1,160 @@
 use bytes::Bytes;
 use serde_json::Value;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Provider;
+
+    fn convert(body: serde_json::Value) -> serde_json::Value {
+        let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let out = RequestMapper::convert_request(&bytes, &Provider::Anthropic).unwrap();
+        serde_json::from_slice(&out).unwrap()
+    }
+
+    #[test]
+    fn test_system_string_content() {
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hi"}
+            ]
+        }));
+        assert_eq!(result["system"], "You are helpful.");
+    }
+
+    #[test]
+    fn test_system_array_content() {
+        // system content 为数组格式时应正确提取文本
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": "You are helpful."}]},
+                {"role": "user", "content": "Hi"}
+            ]
+        }));
+        assert_eq!(result["system"], "You are helpful.");
+    }
+
+    #[test]
+    fn test_multiple_system_messages_merged() {
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "system", "content": "Part 1."},
+                {"role": "system", "content": "Part 2."},
+                {"role": "user", "content": "Hi"}
+            ]
+        }));
+        assert_eq!(result["system"], "Part 1.\n\nPart 2.");
+    }
+
+    #[test]
+    fn test_tool_calls_conversion() {
+        // assistant 消息中的 OpenAI tool_calls 应转换为 Anthropic tool_use
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_abc",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}
+                }]}
+            ]
+        }));
+        let msgs = result["messages"].as_array().unwrap();
+        let assistant_msg = &msgs[1];
+        assert_eq!(assistant_msg["role"], "assistant");
+        let content = assistant_msg["content"].as_array().unwrap();
+        let tool_use = content.iter().find(|b| b["type"] == "tool_use").unwrap();
+        assert_eq!(tool_use["name"], "get_weather");
+        assert_eq!(tool_use["id"], "call_abc");
+        assert_eq!(tool_use["input"]["city"], "Beijing");
+    }
+
+    #[test]
+    fn test_tool_result_conversion() {
+        // role:tool 消息应转换为 Anthropic tool_result
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_abc",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_abc", "content": "Sunny, 25°C"}
+            ]
+        }));
+        let msgs = result["messages"].as_array().unwrap();
+        let tool_result_msg = &msgs[2];
+        assert_eq!(tool_result_msg["role"], "user");
+        let content = tool_result_msg["content"].as_array().unwrap();
+        let tr = &content[0];
+        assert_eq!(tr["type"], "tool_result");
+        assert_eq!(tr["tool_use_id"], "call_abc");
+        assert_eq!(tr["content"], "Sunny, 25°C");
+    }
+
+    #[test]
+    fn test_base64_image_mime_type() {
+        // Base64 图片 MIME 类型应正确提取（不含 data: 前缀和 ;base64 后缀）
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {"type": "image_url", "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgo="
+                    }}
+                ]
+            }]
+        }));
+        let msgs = result["messages"].as_array().unwrap();
+        let content = msgs[0]["content"].as_array().unwrap();
+        let img = content.iter().find(|b| b["type"] == "image").unwrap();
+        assert_eq!(img["source"]["type"], "base64");
+        assert_eq!(img["source"]["media_type"], "image/png"); // 不能是 "data:image/png;base64"
+        assert_eq!(img["source"]["data"], "iVBORw0KGgo=");
+    }
+
+    #[test]
+    fn test_tools_conversion() {
+        // OpenAI tools 定义应转换为 Anthropic tools 格式
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search the web",
+                    "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}
+                }
+            }]
+        }));
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["name"], "search");
+        assert_eq!(tools[0]["description"], "Search the web");
+        assert!(tools[0]["input_schema"].is_object());
+    }
+
+    #[test]
+    fn test_max_completion_tokens_fallback() {
+        // 新 OpenAI 字段 max_completion_tokens 应被正确识别
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_completion_tokens": 1024
+        }));
+        assert_eq!(result["max_tokens"], 1024);
+    }
+}
+
 /// 请求映射器 - 将 OpenAI 格式转换为其他 providers 格式
 pub struct RequestMapper;
 
@@ -11,174 +165,328 @@ impl RequestMapper {
         target_provider: &crate::types::Provider,
     ) -> Result<Bytes, crate::types::GatewayError> {
         let json: Value = serde_json::from_slice(body)?;
-        
+
         match target_provider {
             crate::types::Provider::Anthropic => Self::openai_to_anthropic(json),
-            crate::types::Provider::OpenAI | crate::types::Provider::GoogleGemini | crate::types::Provider::Deepseek | crate::types::Provider::Custom(_) => Ok(body.clone()), // OpenAI 兼容的 providers 直接转发
+            crate::types::Provider::OpenAI
+            | crate::types::Provider::GoogleGemini
+            | crate::types::Provider::Deepseek
+            | crate::types::Provider::Custom(_) => Ok(body.clone()),
         }
     }
-    
+
     /// OpenAI → Anthropic 请求格式转换
     fn openai_to_anthropic(openai_json: Value) -> Result<Bytes, crate::types::GatewayError> {
-        // 获取模型名称并应用版本映射
-        let raw_model = openai_json.get("model")
+        let raw_model = openai_json
+            .get("model")
             .and_then(|m| m.as_str())
             .unwrap_or("claude-3-5-sonnet");
-        
+
         let model = Self::map_model_version(raw_model);
-        
+
         let mut anthropic_json = serde_json::json!({
             "model": model,
-            "max_tokens": openai_json.get("max_tokens").unwrap_or(&Value::Number(serde_json::Number::from(4096u32))),
-            "messages": openai_json.get("messages"),
+            "max_tokens": openai_json.get("max_tokens")
+                .or_else(|| openai_json.get("max_completion_tokens"))
+                .unwrap_or(&Value::Number(serde_json::Number::from(4096u32))),
             "stream": openai_json.get("stream").unwrap_or(&Value::Bool(false))
         });
-        
+
         // 可选参数映射
         if let Some(temp) = openai_json.get("temperature") {
             anthropic_json["temperature"] = temp.clone();
         }
-        
+
         if let Some(top_p) = openai_json.get("top_p") {
             anthropic_json["top_p"] = top_p.clone();
         }
-        
+
         if let Some(stop) = openai_json.get("stop") {
-            // OpenAI 可以是字符串或数组，Anthropic 需要数组
             let stop_sequences: Vec<Value> = match stop {
                 Value::String(s) => vec![Value::String(s.clone())],
-                Value::Array(arr) => {
-                    // 直接克隆 arr，它已经是 Vec<Value>
-                    arr.clone()
-                }
+                Value::Array(arr) => arr.clone(),
                 _ => vec![],
             };
             anthropic_json["stop_sequences"] = Value::Array(stop_sequences);
         }
-        
-        // 提取 system prompt
-        let empty_messages: Vec<Value> = vec![];
-        let messages = openai_json.get("messages").and_then(|m| m.as_array()).unwrap_or(&empty_messages);
-        let mut anthropic_messages = Vec::new();
-        let mut system_prompt = None;
-        
-        for msg in messages {
-            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
-                match role {
-                    "system" => {
-                        system_prompt = Some(msg.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string());
-                    }
-                    "user" => {
-                        let content = Self::convert_openai_user_content(msg.get("content"));
-                        anthropic_messages.push(serde_json::json!({
-                            "role": "user",
-                            "content": content
-                        }));
-                    }
-                    "assistant" => {
-                        let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                        let mut anthropic_msg = serde_json::json!({
-                            "role": "assistant",
-                            "content": content
-                        });
-                        
-                        // 处理 tool_calls
-                        if let Some(tool_calls) = msg.get("tool_calls") {
-                            anthropic_msg["tool_calls"] = tool_calls.clone();
-                        }
-                        
-                        anthropic_messages.push(anthropic_msg);
-                    }
-                    _ => {}
+
+        // 转换 tools（OpenAI functions → Anthropic tools）
+        if let Some(tools) = openai_json.get("tools") {
+            if let Some(tools_arr) = tools.as_array() {
+                let anthropic_tools: Vec<Value> = tools_arr
+                    .iter()
+                    .filter_map(|tool| {
+                        // OpenAI: {type: "function", function: {name, description, parameters}}
+                        // Anthropic: {name, description, input_schema}
+                        let func = tool.get("function")?;
+                        Some(serde_json::json!({
+                            "name": func.get("name").unwrap_or(&Value::String("".to_string())),
+                            "description": func.get("description").unwrap_or(&Value::String("".to_string())),
+                            "input_schema": func.get("parameters").unwrap_or(&serde_json::json!({"type": "object", "properties": {}}))
+                        }))
+                    })
+                    .collect();
+                if !anthropic_tools.is_empty() {
+                    anthropic_json["tools"] = Value::Array(anthropic_tools);
                 }
             }
         }
-        
-        anthropic_json["messages"] = Value::Array(anthropic_messages);
-        
-        // 如果有 system prompt，添加到消息开头
-        if let Some(sys) = system_prompt {
-            anthropic_json["system"] = Value::String(sys);
+
+        // tool_choice 转换
+        if let Some(tool_choice) = openai_json.get("tool_choice") {
+            match tool_choice {
+                Value::String(s) => match s.as_str() {
+                    "auto" => { anthropic_json["tool_choice"] = serde_json::json!({"type": "auto"}); }
+                    "required" => { anthropic_json["tool_choice"] = serde_json::json!({"type": "any"}); }
+                    "none" => {} // Anthropic 不支持 none，不传 tool_choice
+                    _ => {}
+                },
+                Value::Object(obj) => {
+                    // {"type": "function", "function": {"name": "xxx"}}
+                    if let Some(func) = obj.get("function") {
+                        if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                            anthropic_json["tool_choice"] = serde_json::json!({"type": "tool", "name": name});
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
-        
+
+        // 解析消息列表，提取 system prompt 并转换消息格式
+        let empty_messages: Vec<Value> = vec![];
+        let messages = openai_json
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .unwrap_or(&empty_messages);
+
+        let mut anthropic_messages: Vec<Value> = Vec::new();
+        let mut system_parts: Vec<String> = Vec::new();
+
+        for msg in messages {
+            let role = match msg.get("role").and_then(|r| r.as_str()) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            match role {
+                "system" => {
+                    // 支持字符串和数组两种 content 格式，收集所有 system 消息合并
+                    let text = Self::extract_text_content(msg.get("content"));
+                    if !text.is_empty() {
+                        system_parts.push(text);
+                    }
+                }
+                "user" => {
+                    let content = Self::convert_openai_user_content(msg.get("content"));
+                    anthropic_messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": content
+                    }));
+                }
+                "assistant" => {
+                    let mut content_blocks: Vec<Value> = Vec::new();
+
+                    // 文本内容
+                    if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+                        if !text.is_empty() {
+                            content_blocks.push(serde_json::json!({
+                                "type": "text",
+                                "text": text
+                            }));
+                        }
+                    }
+
+                    // 转换 tool_calls → Anthropic tool_use 内容块
+                    // OpenAI: [{id, type:"function", function:{name, arguments}}]
+                    // Anthropic: [{type:"tool_use", id, name, input}]
+                    if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
+                        for tc in tool_calls {
+                            let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                            let func = tc.get("function");
+                            let name = func
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("");
+                            // arguments 是 JSON 字符串，需要解析为对象
+                            let input = func
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|a| a.as_str())
+                                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            content_blocks.push(serde_json::json!({
+                                "type": "tool_use",
+                                "id": id,
+                                "name": name,
+                                "input": input
+                            }));
+                        }
+                    }
+
+                    if content_blocks.is_empty() {
+                        // 确保 assistant 消息有内容（Anthropic 要求非空）
+                        content_blocks.push(serde_json::json!({"type": "text", "text": ""}));
+                    }
+
+                    anthropic_messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": content_blocks
+                    }));
+                }
+                "tool" => {
+                    // OpenAI tool 结果消息 → Anthropic tool_result
+                    // OpenAI: {role:"tool", tool_call_id, content}
+                    // Anthropic: {role:"user", content:[{type:"tool_result", tool_use_id, content}]}
+                    let tool_use_id = msg
+                        .get("tool_call_id")
+                        .and_then(|id| id.as_str())
+                        .unwrap_or("");
+                    let result_content = msg
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+
+                    // 如果前一条消息也是 tool_result user 消息，合并进去
+                    let last_is_tool_result = anthropic_messages.last().map_or(false, |last| {
+                        last.get("role").and_then(|r| r.as_str()) == Some("user")
+                            && last
+                                .get("content")
+                                .and_then(|c| c.as_array())
+                                .map_or(false, |arr| {
+                                    arr.first()
+                                        .and_then(|b| b.get("type"))
+                                        .and_then(|t| t.as_str())
+                                        == Some("tool_result")
+                                })
+                    });
+
+                    let tool_result_block = serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result_content
+                    });
+
+                    if last_is_tool_result {
+                        if let Some(last) = anthropic_messages.last_mut() {
+                            if let Some(arr) = last["content"].as_array_mut() {
+                                arr.push(tool_result_block);
+                            }
+                        }
+                    } else {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": [tool_result_block]
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        anthropic_json["messages"] = Value::Array(anthropic_messages);
+
+        // 合并所有 system 消息
+        if !system_parts.is_empty() {
+            anthropic_json["system"] = Value::String(system_parts.join("\n\n"));
+        }
+
         let result = serde_json::to_vec(&anthropic_json)?;
         Ok(Bytes::from(result))
     }
-    
-    /// 映射模型版本
-    /// 
-    /// Claude 3.x 需要显式的 `-latest` 后缀
-    /// Claude 4.x 不需要后缀（使用 implicit latest）
-    fn map_model_version(model: &str) -> String {
-        let model_lower = model.to_lowercase();
-        
-        // Claude 3.x 模型需要 -latest 后缀
-        if model_lower.contains("claude-3") {
-            // 检查是否已经有后缀
-            if !model.ends_with("-latest") {
-                return format!("{}-latest", model);
+
+    /// 提取消息 content 字段的纯文本（支持字符串和数组格式）
+    fn extract_text_content(content: Option<&Value>) -> String {
+        match content {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(parts)) => {
+                let texts: Vec<String> = parts
+                    .iter()
+                    .filter_map(|p| {
+                        if p.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                texts.join("")
             }
+            _ => String::new(),
         }
-        
-        // Claude 4.x 或其他模型，直接返回（不添加后缀）
+    }
+
+    /// 映射模型版本
+    fn map_model_version(model: &str) -> String {
+        // 已有明确版本号（如日期后缀）或 -latest 后缀，直接返回
+        if model.ends_with("-latest")
+            || model.chars().rev().take(8).all(|c| c.is_ascii_digit() || c == '-')
+        {
+            return model.to_string();
+        }
         model.to_string()
     }
-    
-    /// 转换 OpenAI 用户消息内容
+
+    /// 转换 OpenAI 用户消息内容（支持文本、图片 URL、Base64 图片）
     fn convert_openai_user_content(content: Option<&Value>) -> Value {
         match content {
             Some(Value::String(text)) => Value::String(text.clone()),
             Some(Value::Array(parts)) => {
                 let mut blocks = Vec::new();
                 for part in parts {
-                    if let Some(type_) = part.get("type").and_then(|t| t.as_str()) {
-                        match type_ {
-                            "text" => {
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    blocks.push(serde_json::json!({
-                                        "type": "text",
-                                        "text": text
-                                    }));
-                                }
+                    let type_ = match part.get("type").and_then(|t| t.as_str()) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    match type_ {
+                        "text" => {
+                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                blocks.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                }));
                             }
-                            "image_url" => {
-                                if let Some(image_url) = part.get("image_url") {
-                                    if let Some(url) = image_url.get("url").and_then(|u| u.as_str()) {
-                                        let is_http = url.starts_with("http");
-                                        let image = if is_http {
-                                            serde_json::json!({
+                        }
+                        "image_url" => {
+                            if let Some(image_url) = part.get("image_url") {
+                                if let Some(url) = image_url.get("url").and_then(|u| u.as_str()) {
+                                    if url.starts_with("http://") || url.starts_with("https://") {
+                                        // HTTP URL 图片
+                                        blocks.push(serde_json::json!({
+                                            "type": "image",
+                                            "source": {
+                                                "type": "url",
+                                                "url": url
+                                            }
+                                        }));
+                                    } else if url.starts_with("data:") {
+                                        // Base64 编码图片: data:<mime>;base64,<data>
+                                        // 正确提取 MIME 类型：去掉 "data:" 前缀和 ";base64" 后缀
+                                        if let Some((meta, data)) = url.split_once(',') {
+                                            // meta = "data:image/jpeg;base64"
+                                            let media_type = meta
+                                                .trim_start_matches("data:")
+                                                .split(';')
+                                                .next()
+                                                .unwrap_or("image/jpeg");
+                                            blocks.push(serde_json::json!({
                                                 "type": "image",
                                                 "source": {
-                                                    "type": "url",
-                                                    "url": url
+                                                    "type": "base64",
+                                                    "media_type": media_type,
+                                                    "data": data
                                                 }
-                                            })
-                                        } else {
-                                            // Base64 编码的图片
-                                            if let Some((mime, data)) = url.split_once(',') {
-                                                serde_json::json!({
-                                                    "type": "image",
-                                                    "source": {
-                                                        "type": "base64",
-                                                        "media_type": mime,
-                                                        "data": data
-                                                    }
-                                                })
-                                            } else {
-                                                continue;
-                                            }
-                                        };
-                                        blocks.push(image);
+                                            }));
+                                        }
                                     }
                                 }
                             }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
-                serde_json::json!(blocks)
+                Value::Array(blocks)
             }
-            _ => Value::String("".to_string()),
+            _ => Value::String(String::new()),
         }
     }
 }

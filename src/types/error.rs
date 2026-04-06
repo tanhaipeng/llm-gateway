@@ -2,8 +2,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum GatewayError {
-    // HTTP 网络错误
-    #[error("HTTP error: {0}")]
+    // HTTP 网络错误（reqwest）
+    #[error("HTTP request error: {0}")]
     HttpError(#[from] reqwest::Error),
 
     // IO 错误
@@ -22,7 +22,7 @@ pub enum GatewayError {
     #[error("Stream error: {0}")]
     StreamError(#[from] crate::types::stream::StreamError),
 
-    // HTTP 错误
-    #[error("HTTP error: {0}")]
-    HttpError2(#[from] axum::http::Error),
+    // Axum HTTP 构建错误
+    #[error("Axum HTTP error: {0}")]
+    AxumError(#[from] axum::http::Error),
 }

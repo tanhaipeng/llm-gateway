@@ -9,9 +9,6 @@ pub type SSEStream = BoxTryStream<Bytes>;
 /// 流式响应错误
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
-    #[error("Stream error: {0}")]
-    StreamError(#[from] Box<reqwest_eventsource::Error>),
-
-    #[error("Body error: {0}")]
+    #[error("Stream body error: {0}")]
     BodyError(String),
 }
