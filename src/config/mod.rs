@@ -32,7 +32,7 @@ fn load_from_file(path: &str) -> Result<Config, crate::types::GatewayError> {
         .map_err(|e| crate::types::GatewayError::IoError(e))?;
     
     // 解析 YAML
-    let config: Config = serde_yaml::from_str(&content)
+    let config: Config = serde_yml::from_str(&content)
         .map_err(|e| crate::types::GatewayError::YamlError(e))?;
     
     Ok(config)

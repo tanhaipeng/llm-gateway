@@ -126,12 +126,14 @@ pub async fn proxy_handler(
                         axum::http::Response::from_parts(parts, axum::body::Body::from(bytes))
                             .into_response()
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        // M-6: 响应体超过 10MB 或读取失败，返回 502 而不是空 200
+                        let msg = format!("Failed to read response body: {}", e);
+                        tracing::error!(request_id = %request_id, error = %msg);
                         tracker
-                            .complete(provider.clone(), model.clone(), false, status_code, 0, 0)
+                            .complete_error(provider.clone(), model.clone(), false, 502, msg.clone())
                             .await;
-                        axum::http::Response::from_parts(parts, axum::body::Body::empty())
-                            .into_response()
+                        (axum::http::StatusCode::BAD_GATEWAY, msg).into_response()
                     }
                 }
             } else {
@@ -164,13 +166,22 @@ pub async fn proxy_handler(
 }
 
 /// 从响应体中提取 prompt/completion token 数
+/// 支持 OpenAI 格式（prompt_tokens/completion_tokens）和
+/// Anthropic 格式（input_tokens/output_tokens，在 convert_response 之前的原始响应）
 fn extract_usage(bytes: &Bytes) -> (u64, u64) {
     serde_json::from_slice::<serde_json::Value>(bytes)
         .ok()
         .and_then(|j| {
             let u = j.get("usage")?;
-            let p = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let c = u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            // OpenAI 格式（经过 ResponseMapper 转换后）
+            let p = u.get("prompt_tokens")
+                .and_then(|v| v.as_u64())
+                .or_else(|| u.get("input_tokens").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            let c = u.get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .or_else(|| u.get("output_tokens").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
             Some((p, c))
         })
         .unwrap_or((0, 0))

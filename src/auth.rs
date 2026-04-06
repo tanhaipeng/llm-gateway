@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{Request, StatusCode},
+    http::{Method, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -15,6 +15,11 @@ pub async fn auth_middleware(
     // 跳过健康检查和监控端点
     let path = request.uri().path();
     if path == "/health" || path == "/metrics" {
+        return Ok(next.run(request).await);
+    }
+
+    // H-3: 跳过 OPTIONS 预检请求（CORS preflight），让 CORS 中间件处理
+    if request.method() == Method::OPTIONS {
         return Ok(next.run(request).await);
     }
     

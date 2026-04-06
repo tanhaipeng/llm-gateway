@@ -26,7 +26,6 @@ mod tests {
 
     #[test]
     fn test_system_array_content() {
-        // system content 为数组格式时应正确提取文本
         let result = convert(serde_json::json!({
             "model": "claude-haiku-4-5",
             "messages": [
@@ -52,7 +51,6 @@ mod tests {
 
     #[test]
     fn test_tool_calls_conversion() {
-        // assistant 消息中的 OpenAI tool_calls 应转换为 Anthropic tool_use
         let result = convert(serde_json::json!({
             "model": "claude-haiku-4-5",
             "messages": [
@@ -76,7 +74,6 @@ mod tests {
 
     #[test]
     fn test_tool_result_conversion() {
-        // role:tool 消息应转换为 Anthropic tool_result
         let result = convert(serde_json::json!({
             "model": "claude-haiku-4-5",
             "messages": [
@@ -86,7 +83,7 @@ mod tests {
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": "{}"}
                 }]},
-                {"role": "tool", "tool_call_id": "call_abc", "content": "Sunny, 25°C"}
+                {"role": "tool", "tool_call_id": "call_abc", "content": "Sunny, 25C"}
             ]
         }));
         let msgs = result["messages"].as_array().unwrap();
@@ -96,12 +93,11 @@ mod tests {
         let tr = &content[0];
         assert_eq!(tr["type"], "tool_result");
         assert_eq!(tr["tool_use_id"], "call_abc");
-        assert_eq!(tr["content"], "Sunny, 25°C");
+        assert_eq!(tr["content"], "Sunny, 25C");
     }
 
     #[test]
     fn test_base64_image_mime_type() {
-        // Base64 图片 MIME 类型应正确提取（不含 data: 前缀和 ;base64 后缀）
         let result = convert(serde_json::json!({
             "model": "claude-haiku-4-5",
             "messages": [{
@@ -118,13 +114,12 @@ mod tests {
         let content = msgs[0]["content"].as_array().unwrap();
         let img = content.iter().find(|b| b["type"] == "image").unwrap();
         assert_eq!(img["source"]["type"], "base64");
-        assert_eq!(img["source"]["media_type"], "image/png"); // 不能是 "data:image/png;base64"
+        assert_eq!(img["source"]["media_type"], "image/png");
         assert_eq!(img["source"]["data"], "iVBORw0KGgo=");
     }
 
     #[test]
     fn test_tools_conversion() {
-        // OpenAI tools 定义应转换为 Anthropic tools 格式
         let result = convert(serde_json::json!({
             "model": "claude-haiku-4-5",
             "messages": [{"role": "user", "content": "Hi"}],
@@ -145,13 +140,51 @@ mod tests {
 
     #[test]
     fn test_max_completion_tokens_fallback() {
-        // 新 OpenAI 字段 max_completion_tokens 应被正确识别
         let result = convert(serde_json::json!({
             "model": "claude-haiku-4-5",
             "messages": [{"role": "user", "content": "Hi"}],
             "max_completion_tokens": 1024
         }));
         assert_eq!(result["max_tokens"], 1024);
+    }
+
+    #[test]
+    fn test_tool_choice_none_removes_tools() {
+        // H-4: tool_choice:"none" should remove tools entirely
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{"type": "function", "function": {"name": "search", "parameters": {}}}],
+            "tool_choice": "none"
+        }));
+        assert!(result.get("tools").is_none() || result["tools"].is_null());
+        assert!(result.get("tool_choice").is_none() || result["tool_choice"].is_null());
+    }
+
+    #[test]
+    fn test_tool_result_array_content() {
+        // H-5: tool_result content supports array format
+        let result = convert(serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "fn", "arguments": "{}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": [
+                    {"type": "text", "text": "Result part 1"},
+                    {"type": "text", "text": "Result part 2"}
+                ]}
+            ]
+        }));
+        let msgs = result["messages"].as_array().unwrap();
+        let tr_msg = &msgs[2];
+        assert_eq!(tr_msg["role"], "user");
+        let tr_block = &tr_msg["content"][0];
+        assert_eq!(tr_block["type"], "tool_result");
+        // content should be an array, not a string
+        assert!(tr_block["content"].is_array());
     }
 }
 
@@ -177,12 +210,11 @@ impl RequestMapper {
 
     /// OpenAI → Anthropic 请求格式转换
     fn openai_to_anthropic(openai_json: Value) -> Result<Bytes, crate::types::GatewayError> {
-        let raw_model = openai_json
+        // M-1: 直接使用模型名，不做无意义的版本映射
+        let model = openai_json
             .get("model")
             .and_then(|m| m.as_str())
             .unwrap_or("claude-3-5-sonnet");
-
-        let model = Self::map_model_version(raw_model);
 
         let mut anthropic_json = serde_json::json!({
             "model": model,
@@ -220,8 +252,8 @@ impl RequestMapper {
                         // Anthropic: {name, description, input_schema}
                         let func = tool.get("function")?;
                         Some(serde_json::json!({
-                            "name": func.get("name").unwrap_or(&Value::String("".to_string())),
-                            "description": func.get("description").unwrap_or(&Value::String("".to_string())),
+                            "name": func.get("name").unwrap_or(&Value::String(String::new())),
+                            "description": func.get("description").unwrap_or(&Value::String(String::new())),
                             "input_schema": func.get("parameters").unwrap_or(&serde_json::json!({"type": "object", "properties": {}}))
                         }))
                     })
@@ -233,23 +265,38 @@ impl RequestMapper {
         }
 
         // tool_choice 转换
+        // H-4: tool_choice:"none" → 移除 tools 字段且不传 tool_choice（Anthropic 不支持 none）
+        let mut remove_tools = false;
         if let Some(tool_choice) = openai_json.get("tool_choice") {
             match tool_choice {
                 Value::String(s) => match s.as_str() {
-                    "auto" => { anthropic_json["tool_choice"] = serde_json::json!({"type": "auto"}); }
-                    "required" => { anthropic_json["tool_choice"] = serde_json::json!({"type": "any"}); }
-                    "none" => {} // Anthropic 不支持 none，不传 tool_choice
+                    "auto" => {
+                        anthropic_json["tool_choice"] = serde_json::json!({"type": "auto"});
+                    }
+                    "required" => {
+                        anthropic_json["tool_choice"] = serde_json::json!({"type": "any"});
+                    }
+                    "none" => {
+                        // Anthropic 不支持 none，移除 tools 整个字段
+                        remove_tools = true;
+                    }
                     _ => {}
                 },
                 Value::Object(obj) => {
                     // {"type": "function", "function": {"name": "xxx"}}
                     if let Some(func) = obj.get("function") {
                         if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                            anthropic_json["tool_choice"] = serde_json::json!({"type": "tool", "name": name});
+                            anthropic_json["tool_choice"] =
+                                serde_json::json!({"type": "tool", "name": name});
                         }
                     }
                 }
                 _ => {}
+            }
+        }
+        if remove_tools {
+            if let Some(obj) = anthropic_json.as_object_mut() {
+                obj.remove("tools");
             }
         }
 
@@ -287,7 +334,7 @@ impl RequestMapper {
                 "assistant" => {
                     let mut content_blocks: Vec<Value> = Vec::new();
 
-                    // 文本内容
+                    // 文本内容（非空才添加）
                     if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
                         if !text.is_empty() {
                             content_blocks.push(serde_json::json!({
@@ -300,7 +347,9 @@ impl RequestMapper {
                     // 转换 tool_calls → Anthropic tool_use 内容块
                     // OpenAI: [{id, type:"function", function:{name, arguments}}]
                     // Anthropic: [{type:"tool_use", id, name, input}]
-                    if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
+                    if let Some(tool_calls) =
+                        msg.get("tool_calls").and_then(|tc| tc.as_array())
+                    {
                         for tc in tool_calls {
                             let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
                             let func = tc.get("function");
@@ -323,9 +372,10 @@ impl RequestMapper {
                         }
                     }
 
+                    // H-1: 不插入空文本块；如果 content_blocks 为空则跳过此消息
+                    // Anthropic 不接受空 text 块，也不接受空 content 数组
                     if content_blocks.is_empty() {
-                        // 确保 assistant 消息有内容（Anthropic 要求非空）
-                        content_blocks.push(serde_json::json!({"type": "text", "text": ""}));
+                        continue;
                     }
 
                     anthropic_messages.push(serde_json::json!({
@@ -341,24 +391,31 @@ impl RequestMapper {
                         .get("tool_call_id")
                         .and_then(|id| id.as_str())
                         .unwrap_or("");
-                    let result_content = msg
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("");
+
+                    // H-5: content 支持字符串和数组两种格式
+                    let result_content: Value = match msg.get("content") {
+                        Some(Value::String(s)) => Value::String(s.clone()),
+                        Some(Value::Array(arr)) => {
+                            // 数组格式直接透传（Anthropic tool_result content 支持数组）
+                            Value::Array(arr.clone())
+                        }
+                        _ => Value::String(String::new()),
+                    };
 
                     // 如果前一条消息也是 tool_result user 消息，合并进去
-                    let last_is_tool_result = anthropic_messages.last().map_or(false, |last| {
-                        last.get("role").and_then(|r| r.as_str()) == Some("user")
-                            && last
-                                .get("content")
-                                .and_then(|c| c.as_array())
-                                .map_or(false, |arr| {
-                                    arr.first()
-                                        .and_then(|b| b.get("type"))
-                                        .and_then(|t| t.as_str())
-                                        == Some("tool_result")
-                                })
-                    });
+                    let last_is_tool_result =
+                        anthropic_messages.last().map_or(false, |last| {
+                            last.get("role").and_then(|r| r.as_str()) == Some("user")
+                                && last
+                                    .get("content")
+                                    .and_then(|c| c.as_array())
+                                    .map_or(false, |arr| {
+                                        arr.first()
+                                            .and_then(|b| b.get("type"))
+                                            .and_then(|t| t.as_str())
+                                            == Some("tool_result")
+                                    })
+                        });
 
                     let tool_result_block = serde_json::json!({
                         "type": "tool_result",
@@ -415,17 +472,6 @@ impl RequestMapper {
         }
     }
 
-    /// 映射模型版本
-    fn map_model_version(model: &str) -> String {
-        // 已有明确版本号（如日期后缀）或 -latest 后缀，直接返回
-        if model.ends_with("-latest")
-            || model.chars().rev().take(8).all(|c| c.is_ascii_digit() || c == '-')
-        {
-            return model.to_string();
-        }
-        model.to_string()
-    }
-
     /// 转换 OpenAI 用户消息内容（支持文本、图片 URL、Base64 图片）
     fn convert_openai_user_content(content: Option<&Value>) -> Value {
         match content {
@@ -448,8 +494,12 @@ impl RequestMapper {
                         }
                         "image_url" => {
                             if let Some(image_url) = part.get("image_url") {
-                                if let Some(url) = image_url.get("url").and_then(|u| u.as_str()) {
-                                    if url.starts_with("http://") || url.starts_with("https://") {
+                                if let Some(url) =
+                                    image_url.get("url").and_then(|u| u.as_str())
+                                {
+                                    if url.starts_with("http://")
+                                        || url.starts_with("https://")
+                                    {
                                         // HTTP URL 图片
                                         blocks.push(serde_json::json!({
                                             "type": "image",
@@ -462,7 +512,6 @@ impl RequestMapper {
                                         // Base64 编码图片: data:<mime>;base64,<data>
                                         // 正确提取 MIME 类型：去掉 "data:" 前缀和 ";base64" 后缀
                                         if let Some((meta, data)) = url.split_once(',') {
-                                            // meta = "data:image/jpeg;base64"
                                             let media_type = meta
                                                 .trim_start_matches("data:")
                                                 .split(';')

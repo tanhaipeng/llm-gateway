@@ -6,7 +6,8 @@ mod tests {
     use crate::types::Provider;
 
     fn chunk(json: &str) -> Option<serde_json::Value> {
-        ResponseMapper::convert_stream_chunk(json, &Provider::Anthropic)
+        let mut state = StreamState::new();
+        ResponseMapper::convert_stream_chunk(json, &Provider::Anthropic, &mut state)
             .unwrap()
             .map(|s| serde_json::from_str(&s).unwrap())
     }
@@ -20,7 +21,18 @@ mod tests {
 
     #[test]
     fn test_text_delta() {
-        let result = chunk(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#).unwrap();
+        let mut state = StreamState::new();
+        // Prime state with message_start first
+        let _ = ResponseMapper::convert_stream_chunk(
+            r#"{"type":"message_start","message":{"id":"msg_01","model":"claude-haiku-4-5","usage":{"input_tokens":10},"role":"assistant","content":[]}}"#,
+            &crate::types::Provider::Anthropic,
+            &mut state,
+        );
+        let result = ResponseMapper::convert_stream_chunk(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
+            &crate::types::Provider::Anthropic,
+            &mut state,
+        ).unwrap().map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap()).unwrap();
         assert_eq!(result["choices"][0]["delta"]["content"], "Hello");
     }
 
@@ -64,7 +76,8 @@ mod tests {
     #[test]
     fn test_non_anthropic_passthrough() {
         let raw = r#"{"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}"#;
-        let result = ResponseMapper::convert_stream_chunk(raw, &Provider::OpenAI)
+        let mut state = StreamState::new();
+        let result = ResponseMapper::convert_stream_chunk(raw, &crate::types::Provider::OpenAI, &mut state)
             .unwrap()
             .unwrap();
         assert_eq!(result, raw);
@@ -74,7 +87,7 @@ mod tests {
     fn test_anthropic_non_stream_tool_calls() {
         let anthropic = r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"tool_use","id":"toolu_01","name":"search","input":{"q":"rust"}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5}}"#;
         let result: serde_json::Value = serde_json::from_str(
-            &ResponseMapper::convert_response(anthropic, &Provider::Anthropic, false).unwrap()
+            &ResponseMapper::convert_response(anthropic, &crate::types::Provider::Anthropic, false).unwrap()
         ).unwrap();
         let tc = &result["choices"][0]["message"]["tool_calls"][0];
         assert_eq!(tc["type"], "function");
@@ -84,6 +97,73 @@ mod tests {
         assert_eq!(args["q"], "rust");
         assert_eq!(result["usage"]["prompt_tokens"], 10);
         assert_eq!(result["usage"]["completion_tokens"], 5);
+    }
+
+    #[test]
+    fn test_stream_state_carries_id_and_model() {
+        let mut state = StreamState::new();
+        // message_start sets id and model
+        let start = ResponseMapper::convert_stream_chunk(
+            r#"{"type":"message_start","message":{"id":"msg_real_id","model":"claude-opus-4","usage":{"input_tokens":20},"role":"assistant","content":[]}}"#,
+            &crate::types::Provider::Anthropic,
+            &mut state,
+        ).unwrap().map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap()).unwrap();
+        assert_eq!(start["id"], "msg_real_id");
+        assert_eq!(start["model"], "claude-opus-4");
+
+        // subsequent chunk should use same id and model
+        let delta = ResponseMapper::convert_stream_chunk(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+            &crate::types::Provider::Anthropic,
+            &mut state,
+        ).unwrap().map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap()).unwrap();
+        assert_eq!(delta["id"], "msg_real_id");
+        assert_eq!(delta["model"], "claude-opus-4");
+    }
+
+    #[test]
+    fn test_message_delta_uses_cached_prompt_tokens() {
+        let mut state = StreamState::new();
+        // message_start: input_tokens = 15
+        let _ = ResponseMapper::convert_stream_chunk(
+            r#"{"type":"message_start","message":{"id":"msg_x","model":"claude-3","usage":{"input_tokens":15},"role":"assistant","content":[]}}"#,
+            &crate::types::Provider::Anthropic,
+            &mut state,
+        );
+        // message_delta: usage only has output_tokens
+        let result = ResponseMapper::convert_stream_chunk(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":30}}"#,
+            &crate::types::Provider::Anthropic,
+            &mut state,
+        ).unwrap().map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap()).unwrap();
+        // prompt_tokens should come from cached message_start value
+        assert_eq!(result["usage"]["prompt_tokens"], 15);
+        assert_eq!(result["usage"]["completion_tokens"], 30);
+        assert_eq!(result["usage"]["total_tokens"], 45);
+    }
+}
+
+/// 流式转换跨 chunk 状态（每个 Anthropic SSE 流一个实例）
+#[derive(Debug, Default)]
+pub struct StreamState {
+    /// 从 message_start 中提取的消息 ID
+    pub message_id: String,
+    /// 从 message_start 中提取的模型名
+    pub model: String,
+    /// 从 message_start 中缓存的 input_tokens（message_delta 中没有该字段）
+    pub prompt_tokens: u64,
+    /// 当前已出现的 tool_call 数量（用于生成独立的 tool_calls 索引）
+    pub tool_call_index: u32,
+}
+
+impl StreamState {
+    pub fn new() -> Self {
+        Self {
+            message_id: "chatcmpl-placeholder".to_string(),
+            model: "claude".to_string(),
+            prompt_tokens: 0,
+            tool_call_index: 0,
+        }
     }
 }
 
@@ -104,14 +184,16 @@ impl ResponseMapper {
     }
 
     /// 将单个流式 JSON chunk 转换为 OpenAI 格式
+    /// state 跨 chunk 保持 message_id / model / prompt_tokens / tool_call_index
     /// 返回 Ok(None) 表示该事件应跳过（不发给客户端）
     /// 返回 Ok(Some(json_string)) 表示转换后的 chunk
     pub fn convert_stream_chunk(
         json_str: &str,
         source_provider: &crate::types::Provider,
+        state: &mut StreamState,
     ) -> Result<Option<String>, crate::types::GatewayError> {
         match source_provider {
-            crate::types::Provider::Anthropic => Self::anthropic_chunk_to_openai(json_str),
+            crate::types::Provider::Anthropic => Self::anthropic_chunk_to_openai(json_str, state),
             _ => {
                 // OpenAI 兼容 provider 直接透传
                 Ok(Some(json_str.to_string()))
@@ -261,9 +343,11 @@ impl ResponseMapper {
     }
 
     /// 将单个 Anthropic 流式 JSON chunk 转换为 OpenAI chunk 格式
+    /// state 跨调用保持消息 ID、model、prompt_tokens、tool_call_index
     /// 返回 Ok(None) 表示该事件静默跳过
     fn anthropic_chunk_to_openai(
         json_str: &str,
+        state: &mut StreamState,
     ) -> Result<Option<String>, crate::types::GatewayError> {
         let anthropic_json: Value = match serde_json::from_str(json_str) {
             Ok(v) => v,
@@ -277,7 +361,7 @@ impl ResponseMapper {
 
         let result = match event_type {
             Some("message_start") => {
-                // 提取消息 ID 和 model
+                // 提取消息 ID 和 model，存入 state 供后续 chunk 使用
                 let message = anthropic_json.get("message");
                 let message_id = message
                     .and_then(|m| m.get("id"))
@@ -288,12 +372,17 @@ impl ResponseMapper {
                     .and_then(|m| m.as_str())
                     .unwrap_or("claude");
 
-                // message_start 中也可能包含 input_tokens（预填充 token 数）
+                // 缓存 input_tokens 供 message_delta 使用（message_delta 的 usage 中无此字段）
                 let prompt_tokens = message
                     .and_then(|m| m.get("usage"))
                     .and_then(|u| u.get("input_tokens"))
                     .and_then(|t| t.as_u64())
                     .unwrap_or(0);
+
+                state.message_id = message_id.to_string();
+                state.model = model.to_string();
+                state.prompt_tokens = prompt_tokens;
+                state.tool_call_index = 0;
 
                 Some(serde_json::json!({
                     "id": message_id,
@@ -315,10 +404,6 @@ impl ResponseMapper {
             }
 
             Some("content_block_start") => {
-                let index = anthropic_json
-                    .get("index")
-                    .and_then(|i| i.as_u64())
-                    .unwrap_or(0) as u32;
                 let content_block = anthropic_json.get("content_block");
 
                 if let Some(block) = content_block {
@@ -327,18 +412,23 @@ impl ResponseMapper {
                             block.get("id").and_then(|id| id.as_str()).unwrap_or("");
                         let tool_name =
                             block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+
+                        // 使用独立的 tool_call_index（不用 content_block index，避免与文本块混淆）
+                        let tc_index = state.tool_call_index;
+                        state.tool_call_index += 1;
+
                         Some(serde_json::json!({
-                            "id": "chatcmpl-placeholder",
+                            "id": state.message_id,
                             "object": "chat.completion.chunk",
                             "created": chrono::Utc::now().timestamp(),
-                            "model": "claude",
+                            "model": state.model,
                             "choices": [{
-                                "index": index,
+                                "index": 0,
                                 "delta": {
                                     "role": "assistant",
                                     "content": null,
                                     "tool_calls": [{
-                                        "index": index,
+                                        "index": tc_index,
                                         "id": tool_id,
                                         "type": "function",
                                         "function": { "name": tool_name, "arguments": "" }
@@ -348,8 +438,8 @@ impl ResponseMapper {
                             }]
                         }))
                     } else {
-                        // text block 开始，发空 delta
-                        None // 跳过，减少不必要的 chunk
+                        // text block 开始，发空 delta（跳过减少不必要的 chunk）
+                        None
                     }
                 } else {
                     None
@@ -372,10 +462,10 @@ impl ResponseMapper {
                                 .and_then(|t| t.as_str())
                                 .unwrap_or("");
                             Some(serde_json::json!({
-                                "id": "chatcmpl-placeholder",
+                                "id": state.message_id,
                                 "object": "chat.completion.chunk",
                                 "created": chrono::Utc::now().timestamp(),
-                                "model": "claude",
+                                "model": state.model,
                                 "choices": [{
                                     "index": index,
                                     "delta": { "content": text },
@@ -384,21 +474,23 @@ impl ResponseMapper {
                             }))
                         }
                         Some("input_json_delta") => {
-                            // 工具调用参数增量
+                            // 工具调用参数增量：tool_call_index 已在 content_block_start 递增
+                            // 这里用 tool_call_index - 1 作为当前正在流式输出的工具的索引
+                            let tc_index = state.tool_call_index.saturating_sub(1);
                             let partial_json = delta_obj
                                 .get("partial_json")
                                 .and_then(|j| j.as_str())
                                 .unwrap_or("");
                             Some(serde_json::json!({
-                                "id": "chatcmpl-placeholder",
+                                "id": state.message_id,
                                 "object": "chat.completion.chunk",
                                 "created": chrono::Utc::now().timestamp(),
-                                "model": "claude",
+                                "model": state.model,
                                 "choices": [{
-                                    "index": index,
+                                    "index": 0,
                                     "delta": {
                                         "tool_calls": [{
-                                            "index": index,
+                                            "index": tc_index,
                                             "function": { "arguments": partial_json }
                                         }]
                                     },
@@ -428,20 +520,18 @@ impl ResponseMapper {
                     .map(Self::map_stop_reason_str)
                     .unwrap_or("stop");
 
-                let prompt_tokens = usage
-                    .and_then(|u| u.get("input_tokens"))
-                    .and_then(|t| t.as_i64())
-                    .unwrap_or(0);
+                // message_delta 的 usage 只有 output_tokens；prompt_tokens 从 state 中取缓存值
+                let prompt_tokens = state.prompt_tokens;
                 let completion_tokens = usage
                     .and_then(|u| u.get("output_tokens"))
-                    .and_then(|t| t.as_i64())
+                    .and_then(|t| t.as_u64())
                     .unwrap_or(0);
 
                 Some(serde_json::json!({
-                    "id": "chatcmpl-placeholder",
+                    "id": state.message_id,
                     "object": "chat.completion.chunk",
                     "created": chrono::Utc::now().timestamp(),
-                    "model": "claude",
+                    "model": state.model,
                     "choices": [{
                         "index": 0,
                         "delta": {},
@@ -467,10 +557,10 @@ impl ResponseMapper {
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown stream error");
                 Some(serde_json::json!({
-                    "id": "chatcmpl-placeholder",
+                    "id": state.message_id,
                     "object": "chat.completion.chunk",
                     "created": chrono::Utc::now().timestamp(),
-                    "model": "claude",
+                    "model": state.model,
                     "choices": [{
                         "index": 0,
                         "delta": {},
@@ -481,7 +571,7 @@ impl ResponseMapper {
             }
 
             _ => {
-                // 未知事件类型，透传原始 JSON
+                // 未知事件类型，静默跳过
                 tracing::debug!(event_type = ?event_type, "Unknown Anthropic event type, skipping");
                 None
             }

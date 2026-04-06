@@ -16,7 +16,7 @@ pub enum GatewayError {
 
     // YAML 配置错误
     #[error("YAML error: {0}")]
-    YamlError(#[from] serde_yaml::Error),
+    YamlError(#[from] serde_yml::Error),
 
     // 流式错误
     #[error("Stream error: {0}")]

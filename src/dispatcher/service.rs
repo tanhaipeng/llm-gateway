@@ -1,4 +1,5 @@
 use crate::mapper::{RequestMapper, ResponseMapper};
+use crate::mapper::response::StreamState;
 use crate::types::{Config, Provider, ProviderConfig, SSEStream};
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -57,11 +58,13 @@ impl ProviderClient {
         }
     }
 
+    /// H-6: trim trailing slash from base_url to avoid double slashes
     fn build_url(&self) -> String {
+        let base = self.config.base_url.trim_end_matches('/');
         if self.provider == Provider::Anthropic {
-            format!("{}/v1/messages", self.config.base_url)
+            format!("{}/v1/messages", base)
         } else {
-            format!("{}/v1/chat/completions", self.config.base_url)
+            format!("{}/v1/chat/completions", base)
         }
     }
 
@@ -174,7 +177,9 @@ impl ProviderClient {
                 }
             };
 
-        let mut axum_response = axum::response::Response::builder().status(status);
+        let mut axum_response = axum::response::Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json");
 
         for (name, value) in headers.iter() {
             let n = name.as_str();
@@ -184,6 +189,7 @@ impl ProviderClient {
                 && !n.eq_ignore_ascii_case("connection")
                 && !n.eq_ignore_ascii_case("server")
                 && !n.eq_ignore_ascii_case("date")
+                && !n.eq_ignore_ascii_case("content-type")
             {
                 axum_response = axum_response.header(name, value);
             }
@@ -233,13 +239,19 @@ impl ProviderClient {
             })
         });
 
-        // SSE 帧缓冲器：Anthropic 的 SSE 帧可能跨多个 TCP chunk
-        // 需要按 \n\n 分割，从 data: 行提取 JSON 再转换
-        let converted_stream = Box::pin({
-            // 使用 scan 累积未完整的 SSE 帧
-            let mut buf = String::new();
+        // C-1: 在字节流末尾追加一个哨兵 "\n\n"，确保最后一帧被刷出
+        let byte_stream_with_sentinel = byte_stream.chain(futures::stream::once(async {
+            Ok::<bytes::Bytes, crate::types::GatewayError>(bytes::Bytes::from("\n\n"))
+        }));
 
-            byte_stream.flat_map(move |result| {
+        // SSE 帧缓冲器：Anthropic 的 SSE 帧可能跨多个 TCP chunk
+        // 按 \n\n 分割，从 data: 行提取 JSON 再转换
+        let converted_stream = Box::pin({
+            let mut buf = String::new();
+            // C-2/C-3/C-4: 每个流维护独立的 StreamState 跨 chunk 传递 id/model/tokens
+            let mut stream_state = StreamState::new();
+
+            byte_stream_with_sentinel.flat_map(move |result| {
                 let token_counter_inner = token_counter_clone.clone();
                 let provider = provider_clone.clone();
 
@@ -279,9 +291,9 @@ impl ProviderClient {
                                 continue;
                             }
 
-                            // 转换 JSON chunk
-                            match ResponseMapper::convert_stream_chunk(json_str, &provider) {
-                                // SKIP 表示这个事件不需要发给客户端（ping/content_block_stop 等）
+                            // 转换 JSON chunk（传入 stream_state 保持跨 chunk 状态）
+                            match ResponseMapper::convert_stream_chunk(json_str, &provider, &mut stream_state) {
+                                // SKIP 表示这个事件不需要发给客户端
                                 Ok(None) => {}
                                 Ok(Some(converted)) => {
                                     // 提取 token 使用量（message_delta 事件中的 usage）
@@ -298,7 +310,7 @@ impl ProviderClient {
                                                     .get("completion_tokens")
                                                     .and_then(|t| t.as_u64())
                                                     .unwrap_or(0);
-                                                if prompt > 0 || completion > 0 {
+                                                if completion > 0 {
                                                     token_counter_inner
                                                         .prompt
                                                         .store(prompt, Ordering::Relaxed);
@@ -316,7 +328,6 @@ impl ProviderClient {
                                 }
                                 Err(e) => {
                                     tracing::warn!(error = %e, raw = %json_str, "Failed to convert stream chunk, passing through");
-                                    // 转换失败时透传原始数据（可能是非 Anthropic provider）
                                     output.push(Ok(bytes::Bytes::from(format!(
                                         "data: {}\n\n",
                                         json_str

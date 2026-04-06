@@ -122,35 +122,49 @@ impl RequestLogger {
 
     /// 内部记录请求
     async fn log_request(&self, log: RequestLog) {
-        let mut stats = self.stats.write().await;
-        
-        stats.total_requests += 1;
-        
-        if log.error_message.is_none() {
-            stats.successful_requests += 1;
-            stats.total_tokens += log.total_tokens;
-        } else {
-            stats.failed_requests += 1;
-        }
-        
-        stats.total_duration_ms += log.duration_ms;
-        
-        // 按提供商统计
-        let provider_name = log.provider.clone();
-        *stats.requests_by_provider.entry(provider_name.clone()).or_insert(0) += 1;
-        
-        // 按状态码统计
-        *stats.requests_by_status.entry(log.status_code.to_string()).or_insert(0) += 1;
+        // M-4: 先在独立作用域内持有写锁并更新统计，写锁释放后再调用 tracing::info!
+        // 避免持锁时调用可能阻塞的日志 I/O
+        let (request_id, provider_name, model, status_code, duration_ms, total_tokens, error) = {
+            let mut stats = self.stats.write().await;
 
-        // 输出日志
+            stats.total_requests += 1;
+
+            if log.error_message.is_none() {
+                stats.successful_requests += 1;
+                stats.total_tokens += log.total_tokens;
+            } else {
+                stats.failed_requests += 1;
+            }
+
+            stats.total_duration_ms += log.duration_ms;
+
+            // 按提供商统计
+            *stats.requests_by_provider.entry(log.provider.clone()).or_insert(0) += 1;
+
+            // 按状态码统计
+            *stats.requests_by_status.entry(log.status_code.to_string()).or_insert(0) += 1;
+
+            // 写锁作用域结束前收集需要打印的信息
+            (
+                log.request_id.clone(),
+                log.provider.clone(),
+                log.model.clone(),
+                log.status_code,
+                log.duration_ms,
+                log.total_tokens,
+                log.error_message.clone(),
+            )
+        }; // 写锁在此释放
+
+        // 写锁已释放，再输出日志
         tracing::info!(
-            request_id = %log.request_id,
+            request_id = %request_id,
             provider = %provider_name,
-            model = %log.model,
-            status = log.status_code,
-            duration_ms = log.duration_ms,
-            tokens = log.total_tokens,
-            error = log.error_message.as_deref().unwrap_or("none"),
+            model = %model,
+            status = status_code,
+            duration_ms = duration_ms,
+            tokens = total_tokens,
+            error = error.as_deref().unwrap_or("none"),
             "Request completed"
         );
     }
