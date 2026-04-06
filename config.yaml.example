@@ -73,4 +73,5 @@ providers:
       - "my-model-1"
       - "my-model-2"
     base-url: "https://api.my-custom-provider.com"
+    # protocol: "responses"   # 若上游实现 OpenAI Responses API（/v1/responses）
     # api_key: 从 MY_CUSTOM_PROVIDER_API_KEY 环境变量加载

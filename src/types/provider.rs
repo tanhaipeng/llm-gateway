@@ -44,6 +44,8 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: Option<String>,
     pub version: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

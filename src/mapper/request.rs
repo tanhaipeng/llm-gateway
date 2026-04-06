@@ -12,6 +12,15 @@ mod tests {
         serde_json::from_slice(&out).unwrap()
     }
 
+    fn convert_to_provider_protocol(
+        body: serde_json::Value,
+        provider: Provider,
+    ) -> serde_json::Value {
+        let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let out = RequestMapper::convert_request_by_protocol(&bytes, &provider, true).unwrap();
+        serde_json::from_slice(&out).unwrap()
+    }
+
     #[test]
     fn test_system_string_content() {
         let result = convert(serde_json::json!({
@@ -333,12 +342,86 @@ mod tests {
             other => panic!("unexpected error: {}", other),
         }
     }
+
+    #[test]
+    fn test_chat_completions_to_responses_for_openai_provider() {
+        let result = convert_to_provider_protocol(
+            serde_json::json!({
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": "You are helpful"},
+                    {"role": "user", "content": "Hello"}
+                ],
+                "max_tokens": 128
+            }),
+            Provider::OpenAI,
+        );
+        assert_eq!(result["model"], "gpt-4o-mini");
+        assert_eq!(result["max_output_tokens"], 128);
+        assert_eq!(result["instructions"], "You are helpful");
+        let input = result["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "Hello");
+    }
+
+    #[test]
+    fn test_chat_completions_to_responses_keeps_model_for_any_provider() {
+        let result = convert_to_provider_protocol(
+            serde_json::json!({
+                "model": "claude-3-5-sonnet",
+                "messages": [{"role": "user", "content": "Hello Anthropic"}]
+            }),
+            Provider::Anthropic,
+        );
+        assert_eq!(result["model"], "claude-3-5-sonnet");
+        assert_eq!(result["input"][0]["role"], "user");
+    }
+
+    #[test]
+    fn test_chat_completions_to_responses_with_tool_calls_and_tool_output() {
+        let result = convert_to_provider_protocol(
+            serde_json::json!({
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role":"user","content":"Weather in Beijing?"},
+                    {"role":"assistant","content":null,"tool_calls":[
+                        {"id":"call_123","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}
+                    ]},
+                    {"role":"tool","tool_call_id":"call_123","content":"Sunny"}
+                ]
+            }),
+            Provider::OpenAI,
+        );
+        let input = result["input"].as_array().unwrap();
+        assert!(input
+            .iter()
+            .any(|v| v["type"] == "function_call" && v["call_id"] == "call_123"));
+        assert!(input
+            .iter()
+            .any(|v| v["type"] == "function_call_output" && v["call_id"] == "call_123"));
+    }
 }
 
 /// 请求映射器 - 将 OpenAI 格式转换为其他 providers 格式
 pub struct RequestMapper;
 
 impl RequestMapper {
+    pub fn convert_request_by_protocol(
+        body: &Bytes,
+        target_provider: &crate::types::Provider,
+        is_responses_protocol: bool,
+    ) -> Result<Bytes, crate::types::GatewayError> {
+        if is_responses_protocol {
+            let json: Value = serde_json::from_slice(body)?;
+            let responses_json = Self::chat_completions_to_responses(json)?;
+            return Ok(Bytes::from(serde_json::to_vec(&responses_json)?));
+        }
+
+        Self::convert_request(body, target_provider)
+    }
+
     /// 将 OpenAI 格式的请求体转换为目标 provider 格式
     pub fn convert_request(
         body: &Bytes,
@@ -352,6 +435,220 @@ impl RequestMapper {
             | crate::types::Provider::GoogleGemini
             | crate::types::Provider::Deepseek
             | crate::types::Provider::Custom(_) => Ok(body.clone()),
+        }
+    }
+
+    fn chat_completions_to_responses(
+        chat_json: Value,
+    ) -> Result<Value, crate::types::GatewayError> {
+        let model = chat_json
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("gpt-4o-mini")
+            .to_string();
+
+        let messages = chat_json
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if messages.is_empty() {
+            return Err(crate::types::GatewayError::InvalidRequest(
+                "Chat completions request must contain non-empty `messages`".to_string(),
+            ));
+        }
+
+        let mut instructions: Vec<String> = Vec::new();
+        let mut input: Vec<Value> = Vec::new();
+
+        for msg in &messages {
+            let role = match msg.get("role").and_then(|r| r.as_str()) {
+                Some(r) => r,
+                None => continue,
+            };
+            let content = msg.get("content").unwrap_or(&Value::Null);
+            if role == "system" {
+                let text = Self::extract_text_content(Some(content));
+                if !text.is_empty() {
+                    instructions.push(text);
+                }
+                continue;
+            }
+            match role {
+                "tool" => {
+                    let call_id = msg
+                        .get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if call_id.is_empty() {
+                        continue;
+                    }
+                    let output = Self::chat_tool_output_to_responses_output(content);
+                    input.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output
+                    }));
+                }
+                "assistant" => {
+                    let mapped_content = Self::chat_content_to_responses_input(content);
+                    if !mapped_content.is_empty() {
+                        input.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": mapped_content
+                        }));
+                    }
+
+                    if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                        for tc in tool_calls {
+                            let call_id = tc
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let name = tc
+                                .get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let arguments = tc
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("{}")
+                                .to_string();
+
+                            if !call_id.is_empty() && !name.is_empty() {
+                                input.push(serde_json::json!({
+                                    "type": "function_call",
+                                    "call_id": call_id,
+                                    "name": name,
+                                    "arguments": arguments
+                                }));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let mapped_content = Self::chat_content_to_responses_input(content);
+                    if mapped_content.is_empty() {
+                        continue;
+                    }
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": mapped_content
+                    }));
+                }
+            }
+        }
+
+        if input.is_empty() {
+            return Err(crate::types::GatewayError::InvalidRequest(
+                "No valid messages after completions->responses mapping".to_string(),
+            ));
+        }
+
+        let mut out = serde_json::json!({
+            "model": model,
+            "input": input,
+            "stream": chat_json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false)
+        });
+
+        if !instructions.is_empty() {
+            out["instructions"] = Value::String(instructions.join("\n\n"));
+        }
+
+        if let Some(v) = chat_json.get("max_tokens") {
+            out["max_output_tokens"] = v.clone();
+        }
+        if let Some(v) = chat_json.get("temperature") {
+            out["temperature"] = v.clone();
+        }
+        if let Some(v) = chat_json.get("top_p") {
+            out["top_p"] = v.clone();
+        }
+        if let Some(v) = chat_json.get("tools") {
+            out["tools"] = v.clone();
+        }
+        if let Some(v) = chat_json.get("tool_choice") {
+            out["tool_choice"] = v.clone();
+        }
+        if let Some(v) = chat_json.get("parallel_tool_calls") {
+            out["parallel_tool_calls"] = v.clone();
+        }
+        if let Some(v) = chat_json.get("metadata") {
+            out["metadata"] = v.clone();
+        }
+
+        Ok(out)
+    }
+
+    fn chat_content_to_responses_input(content: &Value) -> Vec<Value> {
+        match content {
+            Value::String(s) => {
+                if s.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![serde_json::json!({
+                        "type": "input_text",
+                        "text": s
+                    })]
+                }
+            }
+            Value::Array(parts) => {
+                let mut out = Vec::new();
+                for part in parts {
+                    match part.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                out.push(serde_json::json!({
+                                    "type": "input_text",
+                                    "text": text
+                                }));
+                            }
+                        }
+                        Some("image_url") => {
+                            if let Some(url) = part
+                                .get("image_url")
+                                .and_then(|v| v.get("url"))
+                                .and_then(|v| v.as_str())
+                            {
+                                out.push(serde_json::json!({
+                                    "type": "input_image",
+                                    "image_url": url
+                                }));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn chat_tool_output_to_responses_output(content: &Value) -> Value {
+        match content {
+            Value::String(s) => Value::String(s.clone()),
+            Value::Array(parts) => {
+                let mut texts = Vec::new();
+                for part in parts {
+                    if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                            texts.push(text.to_string());
+                        }
+                    }
+                }
+                if texts.is_empty() {
+                    Value::String(String::new())
+                } else {
+                    Value::String(texts.join(""))
+                }
+            }
+            other => Value::String(other.to_string()),
         }
     }
 

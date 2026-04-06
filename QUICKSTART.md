@@ -53,6 +53,19 @@ providers:
     base-url: "https://api.mistral.ai"
 ```
 
+如果某个下游 provider 只支持 OpenAI `responses` 协议，可加：
+
+```yaml
+providers:
+  my-provider:
+    models:
+      - "gpt-4.1-mini"
+    base-url: "https://api.my-provider.com"
+    protocol: "responses"
+```
+
+说明：客户端仍然调用 `chat/completions`，网关会自动完成协议适配。
+
 ## 3. 启动服务
 
 ```bash
@@ -83,6 +96,8 @@ curl -X POST http://localhost:8080/openai/v1/chat/completions \
     "stream": true
   }'
 ```
+
+注意：当 provider 配置了 `protocol: "responses"` 时，网关会自动把上游 `responses` 流事件转换为 `chat.completion.chunk` 流。
 
 ### 测试 OpenAI
 ```bash

@@ -14,6 +14,7 @@
 - 🔄 完整的流式处理支持
 - 🛠️ 工具调用支持
 - ⚙️ 灵活的配置方式（环境变量或 YAML 配置文件）
+- 🔁 支持按 provider 配置下游协议（`completions` 或 `responses`）
 
 ## 支持的 Providers
 
@@ -28,6 +29,14 @@
 - DeepSeek
 - xAI
 - 你自己的模型服务
+
+## 协议适配说明
+
+- 客户端入口统一使用 OpenAI `chat/completions`：`/{provider}/v1/chat/completions`
+- 网关会根据 provider 配置决定下游协议：
+  - 默认（不配置 `protocol`）：下游按 `completions` 协议处理
+  - `protocol: "responses"`：网关自动做 `completions -> responses -> completions` 适配
+- 当 provider 配置为 `protocol: "responses"` 时，网关会将流式事件转换为 `chat.completion.chunk` SSE 输出
 
 ## 快速开始
 
@@ -88,6 +97,13 @@ providers:
     models:
       - "mistral-large"
     base-url: "https://api.mistral.ai"
+
+  # 示例：下游只支持 OpenAI Responses 协议
+  my-responses-provider:
+    models:
+      - "gpt-4.1-mini"
+    base-url: "https://api.example.com"
+    protocol: "responses"
 ```
 
 3. **配置环境变量**
@@ -176,6 +192,8 @@ providers:
       - "my-model-1"
       - "my-model-2"
     base-url: "https://api.my-provider.com"
+    # 可选：如果下游只支持 /v1/responses
+    # protocol: "responses"
 ```
 
 ### 步骤 2：配置 API key
@@ -233,6 +251,7 @@ providers:
       - "model-2"
     base-url: "https://api.example.com"  # API 基础 URL
     version: "2023-06-01"     # API 版本（可选，主要用于 Anthropic）
+    protocol: "responses"      # 可选：下游协议，默认 completions
 ```
 
 ### 环境变量
@@ -246,12 +265,12 @@ providers:
 
 ## 自定义 Provider 要求
 
-自定义 provider 必须满足以下要求：
+自定义 provider 要求（按协议）：
 
-1. **OpenAI 兼容 API**：实现 OpenAI 兼容的 API 端点
+1. **默认模式（未配置 protocol）**：实现 OpenAI `chat/completions` 兼容 API
+2. **`protocol: "responses"` 模式**：实现 OpenAI `responses` API（`/v1/responses`）
 2. **标准认证**：使用 Bearer token 认证
-3. **标准端点**：支持 `/v1/chat/completions` 端点
-4. **标准格式**：请求和响应格式与 OpenAI 兼容
+3. **标准格式**：请求和响应格式与对应 OpenAI 协议兼容
 
 ## 架构
 

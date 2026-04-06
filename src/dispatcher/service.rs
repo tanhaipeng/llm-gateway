@@ -110,11 +110,21 @@ impl ProviderClient {
 
     fn build_url(&self) -> String {
         let base = self.config.base_url.trim_end_matches('/');
+        if self.uses_responses_protocol() {
+            return format!("{}/v1/responses", base);
+        }
         if self.provider == Provider::Anthropic {
             format!("{}/v1/messages", base)
         } else {
             format!("{}/v1/chat/completions", base)
         }
+    }
+
+    fn uses_responses_protocol(&self) -> bool {
+        self.config
+            .protocol
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case("responses"))
     }
 
     fn add_provider_headers(
@@ -200,7 +210,11 @@ impl ProviderClient {
         &self,
         body: bytes::Bytes,
     ) -> Result<axum::response::Response, GatewayError> {
-        let converted_body = RequestMapper::convert_request(&body, &self.provider)?;
+        let converted_body = RequestMapper::convert_request_by_protocol(
+            &body,
+            &self.provider,
+            self.uses_responses_protocol(),
+        )?;
         let url = self.build_url();
 
         let request_builder = self
@@ -232,14 +246,17 @@ impl ProviderClient {
             }
         };
 
-        let converted_response =
-            match ResponseMapper::convert_response(&response_data, &self.provider) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to convert response, passing through raw");
-                    response_data
-                }
-            };
+        let converted_response = match ResponseMapper::convert_response_by_protocol(
+            &response_data,
+            &self.provider,
+            self.uses_responses_protocol(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to convert response, passing through raw");
+                response_data
+            }
+        };
 
         let mut axum_response = axum::response::Response::builder()
             .status(status)
@@ -268,7 +285,12 @@ impl ProviderClient {
         &self,
         body: bytes::Bytes,
     ) -> Result<(axum::response::Response, Arc<StreamTokenCounter>), GatewayError> {
-        let converted_body = RequestMapper::convert_request(&body, &self.provider)?;
+        let is_responses_protocol = self.uses_responses_protocol();
+        let converted_body = RequestMapper::convert_request_by_protocol(
+            &body,
+            &self.provider,
+            is_responses_protocol,
+        )?;
         let url = self.build_url();
         let provider_clone = self.provider.clone();
 
@@ -355,6 +377,9 @@ impl ProviderClient {
 
                             // 内部 EOF 哨兵：上游正常 EOF 也要显式结束，避免后台任务等待 900s
                             if frame.trim() == ":__LLM_GATEWAY_EOF__" {
+                                if is_responses_protocol {
+                                    output.push(Ok(bytes::Bytes::from("data: [DONE]\n\n")));
+                                }
                                 token_counter_inner.mark_done();
                                 continue;
                             }
@@ -376,14 +401,16 @@ impl ProviderClient {
                             // [DONE] 终止信号 — 标记流完毕
                             if json_str == "[DONE]" {
                                 token_counter_inner.mark_done();
-                                output.push(Ok(bytes::Bytes::from("data: [DONE]\n\n")));
+                                if !is_responses_protocol {
+                                    output.push(Ok(bytes::Bytes::from("data: [DONE]\n\n")));
+                                }
                                 continue;
                             }
 
                             // provider 侧流式错误/结束事件
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
                                 if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
-                                    if t == "error" {
+                                    if t == "error" || t == "response.failed" {
                                         token_counter_inner.mark_error();
                                     } else if t == "message_stop" {
                                         token_counter_inner.mark_done();
@@ -391,7 +418,12 @@ impl ProviderClient {
                                 }
                             }
 
-                            match ResponseMapper::convert_stream_chunk(json_str, &provider, &mut stream_state) {
+                            match ResponseMapper::convert_stream_chunk_by_protocol(
+                                json_str,
+                                &provider,
+                                &mut stream_state,
+                                is_responses_protocol,
+                            ) {
                                 Ok(None) => {}
                                 Ok(Some(converted)) => {
                                     // C-1: 提取 token 使用量，条件改为 prompt > 0 || completion > 0

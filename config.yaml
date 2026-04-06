@@ -33,5 +33,6 @@ providers:
   # timesniper provider
   timesniper:
     models:
-      - "claude-haiku-4-5"
-    base-url: "https://timesniper.club"
+      - "gpt-5.3-codex"
+    base-url: "https://api.xcode.best"
+    protocol: "responses"  # 如果该 provider 仅支持 /v1/responses，取消注释

@@ -76,6 +76,7 @@ fn load_from_env() -> Config {
                 base_url: "https://api.openai.com".to_string(),
                 api_key: Some(key),
                 version: None,
+                protocol: None,
             },
         );
     }
@@ -93,6 +94,7 @@ fn load_from_env() -> Config {
                 base_url: "https://api.anthropic.com".to_string(),
                 api_key: Some(key),
                 version: Some("2023-06-01".to_string()),
+                protocol: None,
             },
         );
     }
