@@ -33,5 +33,5 @@ providers:
   # timesniper provider
   timesniper:
     models:
-      - "MiniMax-M2.7"
+      - "claude-haiku-4-5"
     base-url: "https://timesniper.club"

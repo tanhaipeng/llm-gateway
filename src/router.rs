@@ -92,8 +92,10 @@ pub async fn proxy_handler(
                 async move {
                     if is_stream {
                         provider_client.forward_request_stream(body).await
+                            .map(|(resp, counter)| (resp, Some(counter)))
                     } else {
                         provider_client.forward_request(body).await
+                            .map(|resp| (resp, None))
                     }
                 },
             ).await;
@@ -102,15 +104,15 @@ pub async fn proxy_handler(
                 Ok(inner_result) => {
                     // 处理内部的 Result
                     match inner_result {
-                        Ok(response) => {
+                        Ok((response, stream_token_counter)) => {
                             // 处理成功的响应
                             let status_code = response.status().as_u16();
-                            
+
                             // 尝试从响应中提取token信息
                             let (prompt_tokens, completion_tokens, final_response) = if !is_stream {
                                 // 对于非流式响应，尝试提取usage信息
                                 let (parts, body) = response.into_parts();
-                                
+
                                 match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
                                     Ok(bytes) => {
                                         let (prompt, completion) = serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -127,7 +129,7 @@ pub async fn proxy_handler(
                                                 Some((prompt, completion))
                                             })
                                             .unwrap_or((0u64, 0u64));
-                                        
+
                                         // 重新构建响应
                                         let new_response = axum::http::Response::from_parts(parts, axum::body::Body::from(bytes));
                                         (prompt, completion, new_response)
@@ -138,11 +140,45 @@ pub async fn proxy_handler(
                                     }
                                 }
                             } else {
-                                // 流式响应暂时无法提取token
-                                (0u64, 0u64, response)
+                                // 流式响应：立即记录请求（token 先为 0），后台异步补充 token 数
+                                let token_counter = stream_token_counter
+                                    .expect("stream response should have token_counter");
+
+                                // 立即记录请求，确保 /metrics 能实时看到请求数
+                                tracker.complete(
+                                    provider.clone(),
+                                    model.clone(),
+                                    true,
+                                    status_code,
+                                    0,
+                                    0,
+                                ).await;
+
+                                // 后台任务：等流消费完毕后补记 token
+                                let logger_bg = request_logger.clone();
+                                tokio::spawn(async move {
+                                    // 轮询等待 token 计数被写入（最多等待 15 分钟）
+                                    let mut waited_ms = 0u64;
+                                    let poll_interval_ms = 200u64;
+                                    let max_wait_ms = 15 * 60 * 1000u64;
+                                    loop {
+                                        tokio::time::sleep(
+                                            std::time::Duration::from_millis(poll_interval_ms)
+                                        ).await;
+                                        waited_ms += poll_interval_ms;
+
+                                        let (prompt, completion) = *token_counter.lock().await;
+                                        if prompt > 0 || completion > 0 || waited_ms >= max_wait_ms {
+                                            logger_bg.add_tokens(prompt, completion).await;
+                                            break;
+                                        }
+                                    }
+                                });
+
+                                return response.into_response();
                             };
-                            
-                            // 记录成功请求
+
+                            // 记录成功请求（非流式）
                             tracker.complete(
                                 provider.clone(),
                                 model.clone(),
@@ -151,7 +187,7 @@ pub async fn proxy_handler(
                                 prompt_tokens,
                                 completion_tokens,
                             ).await;
-                            
+
                             final_response.into_response()
                         }
                         Err(e) => {

@@ -159,6 +159,20 @@ impl RequestLogger {
     pub async fn get_stats(&self) -> RequestStats {
         self.stats.read().await.clone()
     }
+
+    /// 补充 token 统计（用于流式请求在流结束后异步更新）
+    pub async fn add_tokens(&self, prompt_tokens: u64, completion_tokens: u64) {
+        let total = prompt_tokens + completion_tokens;
+        if total > 0 {
+            let mut stats = self.stats.write().await;
+            stats.total_tokens += total;
+            tracing::debug!(
+                prompt_tokens = prompt_tokens,
+                completion_tokens = completion_tokens,
+                "Stream token usage recorded"
+            );
+        }
+    }
 }
 
 /// 请求跟踪器

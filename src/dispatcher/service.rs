@@ -182,7 +182,7 @@ impl ProviderClient {
     pub async fn forward_request_stream(
         &self,
         body: bytes::Bytes,
-    ) -> Result<axum::response::Response, crate::types::GatewayError> {
+    ) -> Result<(axum::response::Response, std::sync::Arc<tokio::sync::Mutex<(u64, u64)>>), crate::types::GatewayError> {
         let converted_body = RequestMapper::convert_request(&body, &self.provider)?;
         let url = self.build_url();
         let provider_clone = self.provider.clone();
@@ -203,7 +203,7 @@ impl ProviderClient {
                 Ok(text) => text,
                 Err(_) => format!("HTTP {}: {}", status, status.canonical_reason().unwrap_or("Unknown")),
             };
-            
+
             tracing::error!("Provider returned error in stream request {}: {}", status, error_body);
 
             // 尝试解析错误响应
@@ -217,17 +217,19 @@ impl ProviderClient {
                                 "code": error_obj.get("code").and_then(|c| c.as_str()).unwrap_or("")
                             }
                         });
-                        return Ok(axum::response::Response::builder()
+                        let empty_counter = std::sync::Arc::new(tokio::sync::Mutex::new((0u64, 0u64)));
+                        return Ok((axum::response::Response::builder()
                             .status(status)
                             .header("Content-Type", "application/json")
                             .body(axum::body::Body::from(serde_json::to_vec(&error_response)
                                 .expect("Failed to serialize error response")))
-                            .expect("Failed to build error response")
-                        );
+                            .expect("Failed to build error response"),
+                            empty_counter,
+                        ));
                     }
                 }
             }
-            
+
             // 返回原始错误文本
             let error_response = serde_json::json!({
                 "error": {
@@ -237,14 +239,21 @@ impl ProviderClient {
                 }
             });
 
-            return Ok(axum::response::Response::builder()
+            let empty_counter = std::sync::Arc::new(tokio::sync::Mutex::new((0u64, 0u64)));
+            return Ok((axum::response::Response::builder()
                 .status(status)
                 .header("Content-Type", "application/json")
                 .body(axum::body::Body::from(serde_json::to_vec(&error_response)
                     .expect("Failed to serialize error response")))
-                .expect("Failed to build error response")
-            );
+                .expect("Failed to build error response"),
+                empty_counter,
+            ));
         }
+
+        // 用于在流处理过程中捕获 token 使用量
+        let token_counter: std::sync::Arc<tokio::sync::Mutex<(u64, u64)>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new((0u64, 0u64)));
+        let token_counter_clone = token_counter.clone();
 
         // 处理流式响应
         let byte_stream = response.bytes_stream().map(|result| {
@@ -255,55 +264,85 @@ impl ProviderClient {
                 )
             })
         });
-        
-        let converted_stream = Box::pin(byte_stream.map(move |result| {
-            result.and_then(|bytes| {
-                // 处理空数据块
-                if bytes.is_empty() {
-                    return Ok(bytes::Bytes::new());
-                }
-                
-                let data = String::from_utf8_lossy(&bytes);
-                
-                // 转换流式数据
-                match ResponseMapper::convert_response(&data, &provider_clone, true) {
-                    Ok(converted) => {
-                        // 检查是否是结束标记
-                        if converted.trim() == "[DONE]" {
-                            return Ok(bytes::Bytes::from("data: [DONE]\n\n"));
+
+        let converted_stream = Box::pin(byte_stream.then(move |result| {
+            let token_counter_inner = token_counter_clone.clone();
+            let provider_clone = provider_clone.clone();
+            async move {
+                result.and_then(|bytes| {
+                    // 处理空数据块
+                    if bytes.is_empty() {
+                        return Ok(bytes::Bytes::new());
+                    }
+
+                    let data = String::from_utf8_lossy(&bytes);
+
+                    // 转换流式数据
+                    match ResponseMapper::convert_response(&data, &provider_clone, true) {
+                        Ok(converted) => {
+                            // 检查是否是结束标记
+                            if converted.trim() == "[DONE]" {
+                                return Ok(bytes::Bytes::from("data: [DONE]\n\n"));
+                            }
+
+                            // 尝试从转换后的 JSON chunk 中提取 usage 字段
+                            // 流式最后一个包含 usage 的非 null chunk 记录了 token 消耗
+                            let json_str = if converted.starts_with("data:") {
+                                converted.trim_start_matches("data:").trim().to_string()
+                            } else {
+                                converted.clone()
+                            };
+                            if let Ok(chunk_json) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                if let Some(usage) = chunk_json.get("usage") {
+                                    if !usage.is_null() {
+                                        let prompt = usage.get("prompt_tokens")
+                                            .and_then(|t| t.as_u64())
+                                            .unwrap_or(0);
+                                        let completion = usage.get("completion_tokens")
+                                            .and_then(|t| t.as_u64())
+                                            .unwrap_or(0);
+                                        if prompt > 0 || completion > 0 {
+                                            // 用 try_lock 避免 async 闭包中的 await 复杂性
+                                            if let Ok(mut counter) = token_counter_inner.try_lock() {
+                                                *counter = (prompt, completion);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 检查转换后的数据是否已经是 SSE 格式（包含 "data:" 前缀）
+                            // 如果已经包含，直接返回原始数据（保留原有的换行符）
+                            // 否则添加 "data: " 前缀和换行符
+                            if converted.starts_with("data:") {
+                                Ok(bytes::Bytes::from(converted))
+                            } else {
+                                Ok(bytes::Bytes::from(format!("data: {}\n\n", converted)))
+                            }
                         }
-                        
-                        // 检查转换后的数据是否已经是 SSE 格式（包含 "data:" 前缀）
-                        // 如果已经包含，直接返回原始数据（保留原有的换行符）
-                        // 否则添加 "data: " 前缀和换行符
-                        if converted.starts_with("data:") {
-                            Ok(bytes::Bytes::from(converted))
-                        } else {
-                            Ok(bytes::Bytes::from(format!("data: {}\n\n", converted)))
+                        Err(e) => {
+                            tracing::warn!("Failed to convert stream data: {}", e);
+                            // 转换失败时，检查原始数据是否已经是 SSE 格式
+                            if data.starts_with("data:") {
+                                Ok(bytes::Bytes::from(data.to_string()))
+                            } else {
+                                Ok(bytes::Bytes::from(format!("data: {}\n\n", data)))
+                            }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to convert stream data: {}", e);
-                        // 转换失败时，检查原始数据是否已经是 SSE 格式
-                        if data.starts_with("data:") {
-                            Ok(bytes::Bytes::from(data.to_string()))
-                        } else {
-                            Ok(bytes::Bytes::from(format!("data: {}\n\n", data)))
-                        }
-                    }
-                }
-            })
+                })
+            }
         })) as SSEStream;
-        
+
         let axum_response = axum::response::Response::builder()
             .status(axum::http::StatusCode::OK)
             .header("Content-Type", "text/event-stream; charset=utf-8")
             .header("Cache-Control", "no-cache, no-transform")
             .header("Connection", "keep-alive")
             .header("X-Accel-Buffering", "no"); // 禁用nginx缓冲
-        
+
         let body = axum::body::Body::from_stream(converted_stream);
-        Ok(axum_response.body(body)?)
+        Ok((axum_response.body(body)?, token_counter))
     }
 }
 
