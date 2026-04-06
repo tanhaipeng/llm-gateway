@@ -118,6 +118,74 @@ providers:
 | `/metrics` | GET | 性能指标（可配置鉴权） |
 | `/{provider}/v1/chat/completions` | POST | 统一聊天补全入口 |
 
+## 架构图
+
+```mermaid
+flowchart LR
+  C[Client SDK / HTTP Client] --> G[LLM Gateway<br/>Axum Server]
+
+  subgraph GW[Gateway Core]
+    G --> M1[Middlewares<br/>CORS / Auth / RateLimit / ConcurrencyLimit]
+    M1 --> R[Router<br/>/health /metrics /{provider}/v1/chat/completions]
+    R --> D[Dispatcher]
+    R --> L[RequestLogger + MetricsCollector]
+  end
+
+  D --> P1[ProviderClient: openai]
+  D --> P2[ProviderClient: anthropic]
+  D --> P3[ProviderClient: custom providers]
+
+  subgraph MAP[Protocol Mapping Layer]
+    Q1[RequestMapper<br/>chat/completions -> target protocol]
+    Q2[ResponseMapper<br/>target protocol -> chat/completions]
+  end
+
+  R --> Q1
+  Q1 --> P1
+  Q1 --> P2
+  Q1 --> P3
+
+  P1 --> U1[Upstream OpenAI-compatible API]
+  P2 --> U2[Upstream Anthropic Messages API]
+  P3 --> U3[Upstream Responses/Completions API]
+
+  U1 --> Q2
+  U2 --> Q2
+  U3 --> Q2
+  Q2 --> R
+  R --> C
+```
+
+### 请求路径（流式 / 非流式）
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant Router
+  participant MapperReq as RequestMapper
+  participant Provider as ProviderClient
+  participant Upstream
+  participant MapperResp as ResponseMapper
+
+  Client->>Router: POST /{provider}/v1/chat/completions
+  Router->>MapperReq: Convert request by provider protocol
+  alt stream=true
+    Router->>Provider: forward_request_stream()
+    Provider->>Upstream: POST (messages/responses/completions)
+    Upstream-->>Provider: SSE chunks
+    Provider->>MapperResp: Convert chunk to OpenAI chat.completion.chunk
+    MapperResp-->>Router: normalized SSE chunk
+    Router-->>Client: data: {...}\n\n ... data: [DONE]
+  else stream=false
+    Router->>Provider: forward_request()
+    Provider->>Upstream: POST (messages/responses/completions)
+    Upstream-->>Provider: JSON response
+    Provider->>MapperResp: Convert to OpenAI chat.completion
+    MapperResp-->>Router: normalized JSON
+    Router-->>Client: 200 JSON
+  end
+```
+
 ## 自定义 Provider
 
 在 `config.yaml` 增加 provider，并在 `.env` 配置 `{PROVIDER}_API_KEY`。provider 名会自动转大写并将 `-` 替换为 `_`。
