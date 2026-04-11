@@ -195,3 +195,27 @@ sequenceDiagram
 - 建议在网关前加反向代理（TLS、WAF、IP 限制）
 - 多实例部署时，建议使用分布式限流（Redis / Envoy / Nginx）
 - API keys 仅放在环境变量，不要提交到仓库
+
+## npm 跨平台打包（zigbuild）
+
+先安装 Zig 和 cargo-zigbuild：
+
+```bash
+brew install zig
+cargo install cargo-zigbuild
+```
+
+执行以下命令构建并打包 npm 包：
+
+```bash
+cargo zigbuild --release --target aarch64-apple-darwin
+cargo zigbuild --release --target x86_64-apple-darwin
+cargo zigbuild --release --target x86_64-unknown-linux-gnu
+cargo zigbuild --release --target x86_64-pc-windows-gnu
+npm run prepare:binaries
+npm pack
+```
+
+产物说明：
+- Rust 二进制分别位于 `target/<triple>/release/llm-gateway`
+- npm 包文件由 `npm pack` 生成在项目根目录

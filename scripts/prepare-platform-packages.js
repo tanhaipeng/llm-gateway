@@ -17,6 +17,16 @@ const targets = [
     triple: 'x86_64-apple-darwin',
     binary: 'llm-gateway',
   },
+  {
+    id: 'linux-x64',
+    triple: 'x86_64-unknown-linux-gnu',
+    binary: 'llm-gateway',
+  },
+  {
+    id: 'win32-x64',
+    triple: 'x86_64-pc-windows-gnu',
+    binary: 'llm-gateway.exe',
+  },
 ]
 
 const missing = []

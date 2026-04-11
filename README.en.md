@@ -195,3 +195,27 @@ Add a provider in `config.yaml`, then set `{PROVIDER}_API_KEY` in `.env`. Provid
 - Put a reverse proxy in front (TLS, WAF, IP controls)
 - For multi-instance deployments, use distributed rate limiting (Redis / Envoy / Nginx)
 - Keep API keys in environment variables only, never commit them
+
+## Cross-platform npm packaging (zigbuild)
+
+Install Zig and cargo-zigbuild first:
+
+```bash
+brew install zig
+cargo install cargo-zigbuild
+```
+
+Run the following commands to build and pack the npm package:
+
+```bash
+cargo zigbuild --release --target aarch64-apple-darwin
+cargo zigbuild --release --target x86_64-apple-darwin
+cargo zigbuild --release --target x86_64-unknown-linux-gnu
+cargo zigbuild --release --target x86_64-pc-windows-gnu
+npm run prepare:binaries
+npm pack
+```
+
+Artifacts:
+- Rust binaries are generated at `target/<triple>/release/llm-gateway`
+- The npm tarball is generated in the project root by `npm pack`
