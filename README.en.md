@@ -126,7 +126,7 @@ flowchart LR
 
   subgraph GW[Gateway Core]
     G --> M1[Middlewares<br/>CORS / Auth / RateLimit / ConcurrencyLimit]
-    M1 --> R[Router<br/>/health /metrics /{provider}/v1/chat/completions]
+    M1 --> R[Router<br/>/health /metrics /:provider/v1/chat/completions]
     R --> D[Dispatcher]
     R --> L[RequestLogger + MetricsCollector]
   end
@@ -167,7 +167,7 @@ sequenceDiagram
   participant Upstream
   participant MapperResp as ResponseMapper
 
-  Client->>Router: POST /{provider}/v1/chat/completions
+  Client->>Router: POST /:provider/v1/chat/completions
   Router->>MapperReq: Convert request by provider protocol
   alt stream=true
     Router->>Provider: forward_request_stream()
@@ -175,7 +175,7 @@ sequenceDiagram
     Upstream-->>Provider: SSE chunks
     Provider->>MapperResp: Convert chunk to OpenAI chat.completion.chunk
     MapperResp-->>Router: normalized SSE chunk
-    Router-->>Client: data: {...}\n\n ... data: [DONE]
+    Router-->>Client: data: <chunk>\n\n ... data: [DONE]
   else stream=false
     Router->>Provider: forward_request()
     Provider->>Upstream: POST (messages/responses/completions)
