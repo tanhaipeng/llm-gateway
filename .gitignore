@@ -19,3 +19,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# npm packaging artifacts
+/npm-bin/
+*.tgz

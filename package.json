@@ -1,0 +1,23 @@
+{
+  "name": "@simontan/llm-gateway",
+  "version": "0.2.1",
+  "description": "Prebuilt llm-gateway binary wrapper for macOS",
+  "license": "MIT",
+  "bin": {
+    "llm-gateway": "bin/llm-gateway.js"
+  },
+  "files": [
+    "bin/llm-gateway.js",
+    "lib/resolve-binary.js",
+    "npm-bin/darwin-arm64/llm-gateway",
+    "npm-bin/darwin-x64/llm-gateway",
+    "README.md",
+    "README.en.md",
+    "README.zh.md"
+  ],
+  "scripts": {
+    "prepare:binaries": "node scripts/prepare-platform-packages.js",
+    "pack:all": "npm run prepare:binaries && npm pack",
+    "prepublishOnly": "npm run prepare:binaries"
+  }
+}
